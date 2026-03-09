@@ -1,0 +1,32 @@
+[project]
+name = "brownfield-cartographer"
+version = "0.1.0"
+description = "The Brownfield Cartographer – multi-agent codebase intelligence for data engineering repos."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "networkx",
+    "sqlglot",
+    "pydantic>=2.0.0",
+    "langgraph",
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "faiss-cpu",
+    "chromadb",
+    "pyyaml",
+    "tree-sitter",
+    "tree-sitter-python",
+    "tree-sitter-sql",
+    "ipykernel",
+    "nbformat",
+    "scikit-learn",
+    "requests",
+]
+
+[project.scripts]
+cartographer = "src.cli:main"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+

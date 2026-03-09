@@ -1,0 +1,216 @@
+"""CLI for Brownfield Cartographer."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from .agents.navigator import NavigatorAgent
+from .graph.knowledge_graph import KnowledgeGraph
+from .orchestrator import run_analysis
+from .semantic_index import SemanticIndex
+from .storage import get_cartography_dir, load_state
+
+
+def _resolve_repo(repo: str) -> Path:
+    """Resolve repo path, optionally cloning from GitHub."""
+    if repo.startswith("https://github.com/") or repo.startswith("git@github.com:"):
+        import subprocess
+        import tempfile
+        clone_dir = Path(tempfile.mkdtemp(prefix="cartographer_clone_"))
+        subprocess.check_call(["git", "clone", "--depth", "1", repo, str(clone_dir)])
+        return clone_dir
+    return Path(repo).resolve()
+
+
+def cmd_analyze(args: argparse.Namespace) -> None:
+    repo_path = _resolve_repo(args.repo)
+    run_analysis(
+        str(repo_path),
+        incremental=args.incremental,
+        local_only=args.local_only,
+    )
+    cart = get_cartography_dir(repo_path)
+    print(f"Analysis complete. Artifacts: {cart}")
+
+
+def _load_or_run(repo: str, force: bool = False):
+    """Load cached state or run analysis."""
+    repo_path = Path(repo).resolve()
+    if not force:
+        cached = load_state(repo_path)
+        if cached:
+            kg, modules, datasets, _ = cached
+            idx = SemanticIndex()
+            idx_path = get_cartography_dir(repo_path) / "semantic_index" / "index.json"
+            if not idx.load(idx_path):
+                idx.build(modules)
+            return kg, modules, datasets, idx
+    res = run_analysis(str(repo_path), local_only=False)
+    return res.graph, res.modules, res.datasets, res.semantic_index or SemanticIndex()
+
+
+def cmd_query(args: argparse.Namespace) -> None:
+    kg, modules, datasets, idx = _load_or_run(args.repo, force=args.force)
+    nav = NavigatorAgent(semantic_index=idx)
+
+    if args.tool == "find_implementation":
+        out = nav.find_implementation(args.concept or "", modules, idx, top_k=args.top_k or 10)
+    elif args.tool == "trace_lineage":
+        out = nav.trace_lineage(kg, args.dataset or "", args.direction or "downstream")
+    elif args.tool == "blast_radius":
+        out = nav.blast_radius(kg, args.module_path or "", modules)
+    elif args.tool == "explain_module":
+        out = nav.explain_module(args.module_path or "", modules)
+    elif args.tool == "sources":
+        out = {"answer": sorted(kg.find_sources())}
+    elif args.tool == "sinks":
+        out = {"answer": sorted(kg.find_sinks())}
+    else:
+        raise SystemExit(f"Unknown tool: {args.tool}")
+
+    print(json.dumps(out, indent=2, default=str))
+
+
+def _route_ask(
+    question: str,
+    kg: KnowledgeGraph,
+    modules: dict,
+    nav: NavigatorAgent,
+    idx: SemanticIndex,
+) -> dict:
+    """Route natural language question to the appropriate Navigator tool."""
+    q = question.lower().strip()
+    # "what produces X" / "upstream of X" / "what feeds X"
+    if "produce" in q or "upstream" in q or "feed" in q or "source" in q:
+        words = question.replace("?", "").split()
+        for i, w in enumerate(words):
+            if w.lower() in ("of", "for", "to") and i + 1 < len(words):
+                ds = words[i + 1].strip("'\"").replace("`", "")
+                return nav.trace_lineage(kg, ds, "upstream")
+        for ds in list(kg.find_sources())[:5]:
+            if ds.split(".")[-1] in q or ds in q:
+                return nav.trace_lineage(kg, ds, "upstream")
+    # "what consumes X" / "downstream of X"
+    if "consum" in q or "downstream" in q:
+        words = question.replace("?", "").split()
+        for i, w in enumerate(words):
+            if w.lower() in ("of", "for") and i + 1 < len(words):
+                ds = words[i + 1].strip("'\"").replace("`", "")
+                return nav.trace_lineage(kg, ds, "downstream")
+    # "blast radius of X" / "what breaks if X"
+    if "blast" in q or "break" in q:
+        for path in modules:
+            if path.split("/")[-1].lower() in q or path in question:
+                return nav.blast_radius(kg, path, modules)
+    # "explain X" / "what does X do"
+    if "explain" in q or "what does" in q:
+        for path in modules:
+            if path.split("/")[-1].lower() in q or path in question:
+                return nav.explain_module(path, modules)
+    # "sources" / "sinks"
+    if q == "sources":
+        return {"answer": sorted(kg.find_sources())}
+    if q == "sinks":
+        return {"answer": sorted(kg.find_sinks())}
+    # Default: semantic search
+    return nav.find_implementation(question, modules, idx, top_k=5)
+
+
+def cmd_shell(args: argparse.Namespace) -> None:
+    """Single interactive shell: analyze, ask, find, lineage, blast, explain, sources, sinks."""
+    repo_path = _resolve_repo(args.repo or ".")
+    kg, modules, datasets, idx = _load_or_run(str(repo_path), force=args.force)
+    nav = NavigatorAgent(semantic_index=idx)
+    help_msg = (
+        "Commands: analyze [--incremental] [--local-only] | ask \"<question>\" | "
+        "find <concept> | lineage <dataset> [up|down] | blast <path> | explain <path> | "
+        "sources | sinks | quit"
+    )
+    print(f"Cartographer shell @ {repo_path}\n{help_msg}\n")
+    while True:
+        try:
+            line = input("> ").strip()
+        except EOFError:
+            break
+        if not line or line in ("q", "quit", "exit"):
+            break
+        parts = line.split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        if cmd == "analyze":
+            inc = "--incremental" in line
+            local = "--local-only" in line
+            run_analysis(str(repo_path), incremental=inc, local_only=local)
+            kg, modules, datasets, idx = _load_or_run(str(repo_path), force=True)
+            nav = NavigatorAgent(semantic_index=idx)
+            print("Analysis complete.")
+        elif cmd == "ask":
+            if not arg:
+                print("Usage: ask \"<your question>\"")
+                continue
+            question = arg.strip("'\"").strip()
+            out = _route_ask(question, kg, modules, nav, idx)
+            print(json.dumps(out, indent=2, default=str))
+        elif cmd == "find":
+            out = nav.find_implementation(arg, modules, idx)
+            print(json.dumps(out.get("answer", []), indent=2, default=str))
+        elif cmd == "lineage":
+            sub = arg.split()
+            ds = sub[0] if sub else ""
+            direction = "upstream" if len(sub) > 1 and sub[1].lower() == "up" else "downstream"
+            out = nav.trace_lineage(kg, ds, direction)
+            print(json.dumps(out, indent=2, default=str))
+        elif cmd == "blast":
+            out = nav.blast_radius(kg, arg, modules)
+            print(json.dumps(out, indent=2, default=str))
+        elif cmd == "explain":
+            out = nav.explain_module(arg, modules)
+            print(out.get("answer", ""))
+        elif cmd == "sources":
+            print(list(kg.find_sources()))
+        elif cmd == "sinks":
+            print(list(kg.find_sinks()))
+        else:
+            print(help_msg)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="cartographer")
+    sub = parser.add_subparsers(dest="command")
+
+    # Shell: default. cartographer [repo] or cartographer shell [repo]
+    p_shell = sub.add_parser("shell", help="Interactive shell with analyze & ask (default)")
+    p_shell.add_argument("repo", nargs="?", default=".", help="Path to repo")
+    p_shell.add_argument("--force", action="store_true", help="Re-run analysis on entry")
+    p_shell.set_defaults(func=cmd_shell)
+
+    p_analyze = sub.add_parser("analyze", help="One-off analysis (for scripts)")
+    p_analyze.add_argument("repo", help="Path to repo or GitHub URL")
+    p_analyze.add_argument("--incremental", action="store_true")
+    p_analyze.add_argument("--local-only", action="store_true")
+    p_analyze.set_defaults(func=cmd_analyze)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    args_list = (argv or [])[:]
+    # Shortcut: cartographer /path -> shell with repo
+    if args_list and args_list[0] not in ("shell", "analyze", "-h", "--help") and not args_list[0].startswith("-"):
+        cmd_shell(argparse.Namespace(repo=args_list[0], force="--force" in args_list))
+        return
+    parser = build_parser()
+    args = parser.parse_args(args_list if args_list else ["shell", "."])
+    if hasattr(args, "repo") and args.repo is None:
+        args.repo = "."
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
