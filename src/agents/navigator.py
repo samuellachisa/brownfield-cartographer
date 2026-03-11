@@ -76,13 +76,18 @@ class NavigatorAgent:
         dataset: str,
         direction: Literal["upstream", "downstream"] = "downstream",
     ) -> Dict[str, Any]:
-        """Traverse lineage graph with file:line citations."""
+        """Traverse lineage graph with file:line citations and a short summary."""
         ds_id = dataset if dataset in graph.lineage_graph else None
         if not ds_id:
             return {"answer": f"Dataset '{dataset}' not found.", "evidence": []}
         sub = graph.blast_radius(ds_id, direction=direction)
         nodes = [{"id": n, **d} for n, d in sub.nodes(data=True)]
         edges = [{"source": u, "target": v, **d} for u, v, d in sub.edges(data=True)]
+        # Derive a concise path summary to make the graph easier to interpret
+        paths = graph.critical_paths_from(ds_id, direction=direction, max_depth=10, top_k=3)
+        summary_paths = [
+            " -> ".join(p for p in path if sub.nodes[p].get("type") == "dataset") for path in paths
+        ]
         evidence = []
         for _, _, d in sub.edges(data=True):
             if "source_file" in d:
@@ -93,7 +98,16 @@ class NavigatorAgent:
                     "agent": "navigator",
                     "confidence": 0.9,
                 })
-        return {"answer": {"direction": direction, "nodes": nodes, "edges": edges}, "evidence": evidence}
+        return {
+            "answer": {
+                "direction": direction,
+                "nodes": nodes,
+                "edges": edges,
+                "dataset": ds_id,
+                "critical_paths": summary_paths,
+            },
+            "evidence": evidence,
+        }
 
     def blast_radius(
         self,
@@ -105,10 +119,12 @@ class NavigatorAgent:
         mod = modules.get(module_path)
         if not mod:
             return {"answer": f"Module '{module_path}' not found.", "evidence": []}
-        # Find datasets touched by this module (via transformations)
+        # Find datasets and transformations touched by this module (via transformations)
         impacted = set()
+        impacted_transforms = set()
         for n, d in graph.lineage_graph.nodes(data=True):
             if d.get("type") == "transformation" and d.get("source_file", "").endswith(module_path.split("/")[-1]):
+                impacted_transforms.add(n)
                 sub = graph.blast_radius(n, direction="downstream")
                 for nn, dd in sub.nodes(data=True):
                     if dd.get("type") == "dataset":
@@ -124,6 +140,7 @@ class NavigatorAgent:
             "answer": {
                 "module": module_path,
                 "impacted_datasets": sorted(impacted),
+                "impacted_transformations": sorted(impacted_transforms),
             },
             "evidence": [ev.model_dump()],
         }

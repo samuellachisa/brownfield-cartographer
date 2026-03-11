@@ -8,8 +8,9 @@ from typing import Dict, Iterable, Optional, Set
 
 from ..analyzers.tree_sitter_analyzer import TreeSitterAnalyzer
 from ..analyzers.dag_config_parser import DAGConfigParser
+from ..config import CartographerConfig, load_config
 from ..graph.knowledge_graph import KnowledgeGraph
-from ..models import ModuleNode
+from ..models import ModuleNode, ModuleEdgeType
 
 
 @dataclass
@@ -22,10 +23,11 @@ class SurveyorAgent:
     Static structure analysis: module graph, PageRank inputs, git velocity, dead code candidates.
     """
 
-    def __init__(self, config: SurveyorConfig | None = None) -> None:
+    def __init__(self, config: SurveyorConfig | None = None, global_config: CartographerConfig | None = None) -> None:
         self.config = config or SurveyorConfig()
         self.analyzer = TreeSitterAnalyzer()
         self.dag_parser = DAGConfigParser()
+        self._global_config = global_config
 
     def run(
         self,
@@ -33,9 +35,10 @@ class SurveyorAgent:
         graph: KnowledgeGraph,
         changed_files: Optional[Set[str]] = None,
     ) -> Dict[str, ModuleNode]:
+        cfg = self._global_config or load_config(repo_root)
         modules: Dict[str, ModuleNode] = {}
 
-        for path in self._iter_files(repo_root, changed_files):
+        for path in self._iter_files(repo_root, changed_files, cfg):
             try:
                 language = self._language_for_path(path)
                 last_modified = self._last_modified(repo_root, path)
@@ -98,17 +101,49 @@ class SurveyorAgent:
             except Exception as e:
                 print(f"[surveyor] Skipping file {path} due to error: {e}")
 
+        # Graph-level analyses: PageRank, degrees, cycles, and dead code candidates.
+        pr = graph.pagerank()
+        scc = list(graph.strongly_connected_components())
+        cycle_nodes = {n for comp in scc if len(comp) > 1 for n in comp}
+
+        for path, module in modules.items():
+            if path in pr:
+                module.pagerank = float(pr[path])
+            if path in cycle_nodes:
+                module.is_in_cycle = True
+            if path in graph.module_graph:
+                module.in_degree = int(graph.module_graph.in_degree(path))
+                module.out_degree = int(graph.module_graph.out_degree(path))
+
+        # Dead-code candidates: no inbound references, no recent changes, and
+        # not in known "entrypoint" locations (e.g. CLI scripts, DAG roots).
+        entrypoint_prefixes = ("bin/", "scripts/", "dags/", "dg_deployments/")
+        for path, module in modules.items():
+            if path not in graph.module_graph:
+                continue
+            has_incoming = any(
+                d.get("type") in {ModuleEdgeType.IMPORTS.value, ModuleEdgeType.CALLS.value}
+                for _, _, d in graph.module_graph.in_edges(path, data=True)
+            )
+            is_entrypoint = path.startswith(entrypoint_prefixes)
+            if (not has_incoming) and (module.change_velocity_30d == 0) and (not is_entrypoint):
+                module.is_dead_code_candidate = True
+                if path in graph.module_graph.nodes:
+                    graph.module_graph.nodes[path]["is_dead_code_candidate"] = True
+
         return modules
 
     def _iter_files(
         self,
         root: Path,
         changed_files: Optional[Set[str]] = None,
+        cfg: CartographerConfig | None = None,
     ) -> Iterable[Path]:
         for path in root.rglob("*"):
             if not path.is_file():
                 continue
-            if any(part in {".git", ".venv", "venv", "node_modules", "site-packages"} for part in path.parts):
+            ignore_dirs = set((cfg.ignore_dirs if cfg else []))
+            if any(part in ignore_dirs for part in path.parts):
                 continue
             if path.suffix.lower() in {".py", ".sql", ".yaml", ".yml"}:
                 rel = str(path.relative_to(root))

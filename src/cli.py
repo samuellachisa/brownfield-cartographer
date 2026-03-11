@@ -199,6 +199,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_analyze.add_argument("--local-only", action="store_true")
     p_analyze.set_defaults(func=cmd_analyze)
 
+    # Query: non-interactive Navigator tools (for scripts / CI)
+    p_query = sub.add_parser("query", help="Run Navigator tools (find, lineage, blast, explain, sources, sinks)")
+    p_query.add_argument("repo", help="Path to repo")
+    p_query.add_argument(
+        "tool",
+        choices=[
+            "find_implementation",
+            "trace_lineage",
+            "blast_radius",
+            "explain_module",
+            "sources",
+            "sinks",
+        ],
+        help="Navigator tool to run",
+    )
+    p_query.add_argument("--concept", help="Concept to search for (find_implementation)")
+    p_query.add_argument("--dataset", help="Dataset name (trace_lineage)")
+    p_query.add_argument(
+        "--direction",
+        choices=["upstream", "downstream"],
+        help="Lineage direction (trace_lineage)",
+    )
+    p_query.add_argument("--module-path", dest="module_path", help="Module path (blast_radius, explain_module)")
+    p_query.add_argument("--top-k", dest="top_k", type=int, help="Top-k results (find_implementation)")
+    p_query.add_argument(
+        "--force",
+        action="store_true",
+        help="Force re-analysis instead of loading cached state",
+    )
+    p_query.set_defaults(func=cmd_query)
+
     return parser
 
 

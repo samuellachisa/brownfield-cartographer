@@ -23,6 +23,10 @@ class ModuleNode(BaseModel):
     complexity_score: float = 0.0
     change_velocity_30d: int = 0
     is_dead_code_candidate: bool = False
+    pagerank: float = 0.0
+    is_in_cycle: bool = False
+    in_degree: int = 0
+    out_degree: int = 0
     last_modified: datetime
     doc_drift: Optional[Literal["aligned", "outdated", "contradictory", "missing"]] = None
 
@@ -102,7 +106,20 @@ class FunctionNode(BaseModel):
 class TransformationNode(BaseModel):
     source_datasets: List[str]
     target_datasets: List[str]
-    transformation_type: Literal["pandas", "spark", "sql", "dbt", "airflow"]
+    # The set of transformation types is intentionally broad to support
+    # multiple analyzers (SQL, Python, YAML/dbt, Airflow, etc.). We keep
+    # these as a closed Literal for type-safety but include all variants
+    # used by analyzers such as HydrologistAgent.
+    transformation_type: Literal[
+        "pandas",
+        "spark",
+        "sql",
+        "dbt",
+        "airflow",
+        "python",
+        "yaml",
+        "unknown",
+    ]
     source_file: str
     line_range: Tuple[int, int]
     sql_query_if_applicable: Optional[str] = None

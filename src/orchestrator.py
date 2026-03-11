@@ -108,19 +108,13 @@ def run_analysis(
     traces.append({"action": "surveyor", "modules_count": len(modules)})
     print(f"[cartographer] Surveyor complete. Modules analyzed: {len(modules)}")
 
-    # Compute and persist PageRank scores and circular dependency clusters so
-    # downstream tools can reason about structural importance.
-    pr = kg.pagerank()
-    scc = list(kg.strongly_connected_components())
-
     # Derive a concise report of the "hottest" modules by combining structural
-    # centrality (PageRank) with recent git velocity. This is intentionally
-    # simple but provides a high-signal view of where risk and churn intersect.
+    # centrality (PageRank computed in Surveyor) with recent git velocity.
     hotspots = sorted(
         (
             {
                 "path": path,
-                "pagerank": float(pr.get(path, 0.0)),
+                "pagerank": float(mod.pagerank),
                 "change_velocity_30d": int(mod.change_velocity_30d),
             }
             for path, mod in modules.items()
@@ -132,8 +126,8 @@ def run_analysis(
     traces.append(
         {
             "action": "surveyor_metrics",
-            "pagerank_computed_for": len(pr),
-            "scc_components": len(scc),
+            "pagerank_computed_for": len([m for m in modules.values() if m.pagerank > 0]),
+            "scc_components": None,
             "hotspots": hotspots,
         }
     )
@@ -156,19 +150,6 @@ def run_analysis(
             datasets[k] = v
     traces.append({"action": "hydrologist", "datasets_count": len(datasets)})
     print(f"[cartographer] Hydrologist complete. Datasets discovered: {len(datasets)}")
-
-    # Dead code detection
-    for path, module in modules.items():
-        if path not in kg.module_graph:
-            continue
-        has_incoming = any(
-            d.get("type") in {"IMPORTS", "CALLS"}
-            for _, _, d in kg.module_graph.in_edges(path, data=True)
-        )
-        if not has_incoming:
-            module.is_dead_code_candidate = True
-            if path in kg.module_graph.nodes:
-                kg.module_graph.nodes[path]["is_dead_code_candidate"] = True
 
     # Semanticist (LLM) and Day-One
     if not local_only:

@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 from ..graph.knowledge_graph import KnowledgeGraph
 from ..models import DayOneAnswer, Evidence, ModuleNode
+from ..config import CartographerConfig, load_config
 from ..utils.retry import RateLimiter, retry_with_backoff
 
 # Load .env so OPENAI_API_KEY etc. are available
@@ -136,14 +137,49 @@ class SemanticistAgent:
     ModuleNode.purpose_statement.
     """
 
-    def __init__(self, config: SemanticistConfig | None = None, llm_config: LLMConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: SemanticistConfig | None = None,
+        llm_config: LLMConfig | None = None,
+        global_config: CartographerConfig | None = None,
+    ) -> None:
         self.config = config or SemanticistConfig()
         self._llm_config = llm_config or LLMConfig()
+        self._global_config = global_config
+        self._budget = ContextWindowBudget()
+
+    def _maybe_load_config(self, repo_root: Path) -> CartographerConfig:
+        if self._global_config is None:
+            self._global_config = load_config(repo_root)
+        return self._global_config
+
+    def _estimate_tokens(self, text: str) -> int:
+        # Cheap heuristic: 1 token ~ 4 characters.
+        return max(1, len(text) // 4)
+
+    def _apply_redaction(self, text: str, cfg: CartographerConfig) -> str:
+        if not cfg.privacy.redaction_patterns:
+            return text
+        import re
+
+        redacted = text
+        for pattern in cfg.privacy.redaction_patterns:
+            try:
+                redacted = re.sub(pattern, "__REDACTED__", redacted)
+            except re.error:
+                # Ignore invalid patterns so a bad config does not break analysis.
+                continue
+        return redacted
 
     def run(self, repo_root: Path, modules: Dict[str, ModuleNode]) -> None:
         # If no API key is set, treat as a no-op so the rest of the pipeline still works.
         if not self._llm_config.api_key:
             return
+
+        cfg = self._maybe_load_config(repo_root)
+        # Sync budget limits with global config.
+        self._budget.max_bulk = cfg.budget.max_bulk_tokens
+        self._budget.max_synthesis = cfg.budget.max_synthesis_tokens
 
         client = LLMClient(self._llm_config)
 
@@ -168,12 +204,19 @@ class SemanticistAgent:
                 continue
 
             snippet = text[: self.config.max_chars_per_module]
+            snippet = self._apply_redaction(snippet, cfg)
+            est_tokens = self._estimate_tokens(snippet)
+            if not self._budget.can_spend_bulk(est_tokens):
+                # Budget exhausted for bulk summarisation; stop early so we
+                # still have headroom for synthesis tasks (Day-One answers).
+                break
             try:
                 purpose = client.summarize_module(module.path, snippet)
             except Exception:
                 # Fail-soft: keep the rest of the pipeline intact even if some
                 # LLM calls fail (e.g. rate limits, network issues).
                 continue
+            self._budget.record_bulk(est_tokens)
             if purpose:
                 module.purpose_statement = purpose
 

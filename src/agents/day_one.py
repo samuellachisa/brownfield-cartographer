@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from ..config import CartographerConfig, load_config
 from ..models import DayOneAnswer, Evidence
-from .semanticist import LLMClient, LLMConfig
+from .semanticist import LLMClient, LLMConfig, ContextWindowBudget
 
 
 def answer_day_one_questions(
@@ -13,6 +14,7 @@ def answer_day_one_questions(
     modules: Dict[str, Any],
     datasets: Dict[str, Any],
     llm_config: LLMConfig | None = None,
+    global_config: CartographerConfig | None = None,
 ) -> Dict[str, DayOneAnswer]:
     """Synthesis prompt to answer the Five FDE Day-One Questions."""
     config = llm_config or LLMConfig()
@@ -23,6 +25,12 @@ def answer_day_one_questions(
         client = LLMClient(config)
     except Exception:
         return _heuristic_answers(modules)
+
+    cfg = global_config or load_config(getattr(graph, "repo_root", None) or Path("."))  # type: ignore[arg-type]
+    budget = ContextWindowBudget(
+        max_bulk=cfg.budget.max_bulk_tokens,
+        max_synthesis=cfg.budget.max_synthesis_tokens,
+    )
 
     pr = graph.pagerank() if hasattr(graph, "pagerank") else {}
     top_modules = sorted(pr.items(), key=lambda x: x[1], reverse=True)[:5]
@@ -65,6 +73,10 @@ def answer_day_one_questions(
     for q in questions:
         prompt += f'\n- "{q}"'
 
+    est_tokens = max(1, len(prompt) // 4)
+    if not budget.can_spend_synthesis(est_tokens):
+        return _heuristic_answers(modules)
+
     try:
         client._rate_limiter.wait()
         r = client._client.chat.completions.create(
@@ -82,6 +94,7 @@ def answer_day_one_questions(
             if raw.startswith("json"):
                 raw = raw[4:]
         data = json.loads(raw.strip())
+        budget.record_synthesis(est_tokens)
     except Exception:
         return _heuristic_answers(modules)
 

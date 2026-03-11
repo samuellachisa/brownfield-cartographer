@@ -42,6 +42,11 @@ cartographer shell /path/to/repo
 
 # One-off analysis for scripts
 cartographer analyze /path/to/repo [--incremental] [--local-only]
+
+# Non-interactive Navigator queries (CI / scripts)
+cartographer query /path/to/repo find_implementation --concept "revenue calculation"
+cartographer query /path/to/repo trace_lineage --dataset customers --direction upstream
+cartographer query /path/to/repo blast_radius --module-path src/transforms/revenue.py
 ```
 
 ### Shell commands
