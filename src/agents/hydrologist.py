@@ -147,8 +147,8 @@ class HydrologistAgent:
                 cfg = self.dag_parser.parse(path)
                 if not cfg or not cfg.tasks:
                     continue
-                src_nodes: List[str] = []
-                tgt_nodes: List[str] = []
+
+                # Ensure DatasetNode instances exist for every task/pipeline node.
                 for task in cfg.tasks:
                     if task not in datasets:
                         datasets[task] = DatasetNode(
@@ -160,17 +160,48 @@ class HydrologistAgent:
                             is_source_of_truth=False,
                         )
                         graph.add_dataset(datasets[task])
-                    tgt_nodes.append(task)
 
-                transform = TransformationNode(
-                    source_datasets=src_nodes,
-                    target_datasets=tgt_nodes,
-                    transformation_type=cfg.config_type or "yaml",
-                    source_file=str(path),
-                    line_range=(1, 1),
-                    sql_query_if_applicable=None,
-                )
-                graph.add_transformation(transform)
+                # If we have explicit task dependencies, emit one transformation
+                # per edge to reflect the pipeline topology. Otherwise, fall
+                # back to a single config-level transformation as before.
+                if cfg.dependencies:
+                    for task, upstreams in cfg.dependencies.items():
+                        src_nodes: List[str] = []
+                        tgt_nodes: List[str] = [task]
+                        for upstream in upstreams:
+                            if upstream not in datasets:
+                                datasets[upstream] = DatasetNode(
+                                    name=upstream,
+                                    storage_type="table",
+                                    schema_snapshot=None,
+                                    freshness_sla=None,
+                                    owner=None,
+                                    is_source_of_truth=False,
+                                )
+                                graph.add_dataset(datasets[upstream])
+                            src_nodes.append(upstream)
+
+                        transform = TransformationNode(
+                            source_datasets=src_nodes,
+                            target_datasets=tgt_nodes,
+                            transformation_type=cfg.config_type or "yaml",
+                            source_file=str(path),
+                            line_range=(1, 1),
+                            sql_query_if_applicable=None,
+                        )
+                        graph.add_transformation(transform)
+                else:
+                    src_nodes: List[str] = []
+                    tgt_nodes: List[str] = list(cfg.tasks)
+                    transform = TransformationNode(
+                        source_datasets=src_nodes,
+                        target_datasets=tgt_nodes,
+                        transformation_type=cfg.config_type or "yaml",
+                        source_file=str(path),
+                        line_range=(1, 1),
+                        sql_query_if_applicable=None,
+                    )
+                    graph.add_transformation(transform)
             except Exception as e:
                 print(f"[hydrologist] Skipping YAML file {path} due to error: {e}")
 

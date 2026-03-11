@@ -84,3 +84,33 @@ def test_sql_lineage_tracks_read_columns(tmp_path: Path) -> None:
     assert dep.read_columns, "Expected read_columns to be populated"
     all_cols = {c for cols in dep.read_columns.values() for c in cols}
     assert "id" in all_cols or "total" in all_cols or "email" in all_cols
+
+
+def test_sql_lineage_exposes_joins_and_cte_dependencies(tmp_path: Path) -> None:
+    sql = """
+    with recent_orders as (
+        select o.id, o.total, u.email
+        from raw.orders o
+        join raw.users u on o.user_id = u.id
+    )
+    select *
+    from recent_orders;
+    """
+    path = tmp_path / "joins_cte.sql"
+    path.write_text(sql, encoding="utf-8")
+
+    analyzer = SQLLineageAnalyzer(dialect="ansi")
+    deps = list(analyzer.analyze_file(path))
+    assert deps, "Expected at least one SQL dependency"
+    dep = deps[0]
+
+    # Join topology should mention at least one joined table.
+    assert dep.joins, "Expected joins metadata to be populated"
+    joined_tables = {tbl for (tbl, _kind) in dep.joins}
+    assert any("raw.users" in t for t in joined_tables)
+
+    # CTE dependencies should map the CTE name to its physical sources.
+    assert dep.cte_dependencies, "Expected CTE dependency metadata"
+    assert "recent_orders" in dep.cte_dependencies
+    cte_sources = set(dep.cte_dependencies["recent_orders"])
+    assert any("raw.orders" in s for s in cte_sources)

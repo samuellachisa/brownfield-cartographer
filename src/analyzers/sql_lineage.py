@@ -18,6 +18,13 @@ class SQLDependency:
     cte_names: List[str]
     # Optional column-level lineage: mapping table name -> list of columns
     read_columns: Dict[str, List[str]]
+    # Best-effort join topology: each entry is a (table, join_type) pair for
+    # tables appearing on the right-hand side of an explicit JOIN clause.
+    joins: List[Tuple[str, str]]
+    # CTE dependency graph: mapping CTE name -> list of physical source tables
+    # referenced inside the CTE body (excluding other CTEs). This helps
+    # reconstruct multi-hop lineage within complex WITH chains.
+    cte_dependencies: Dict[str, List[str]]
 
 
 class SQLLineageAnalyzer:
@@ -97,6 +104,24 @@ class SQLLineageAnalyzer:
                 if alias and alias not in cte_names:
                     cte_names.append(alias)
 
+            # Within each CTE, also record which physical tables it depends on.
+            cte_dependencies: Dict[str, Set[str]] = {}
+            for cte in stmt.find_all(exp.CTE):
+                alias = None
+                if isinstance(cte.this, exp.Alias):
+                    alias = cte.this.alias
+                elif isinstance(cte.this, exp.Table):
+                    alias = cte.this.alias
+                if not alias:
+                    continue
+                body = cte.this
+                deps: Set[str] = set()
+                for t in body.find_all(exp.Table):
+                    if t.name not in cte_names:
+                        deps.add(t.sql(dialect=self.dialect))
+                if deps:
+                    cte_dependencies[alias] = deps
+
             # Reads: every table reference in the statement that is not a CTE.
             sources = {
                 t.sql(dialect=self.dialect)
@@ -138,6 +163,21 @@ class SQLLineageAnalyzer:
                 if delete.this:
                     targets.add(delete.this.sql(dialect=self.dialect))
 
+            # Join topology: for each JOIN, record the right-hand table and
+            # join type (INNER/LEFT/RIGHT/FULL/CROSS...). We intentionally keep
+            # this lightweight and do not attempt full alias resolution here.
+            joins: List[Tuple[str, str]] = []
+            for join in stmt.find_all(exp.Join):
+                try:
+                    right_expr = join.this
+                    right_sql = right_expr.sql(dialect=self.dialect)
+                    kind = join.args.get("kind") or "join"
+                    join_type = str(kind).upper()
+                    joins.append((right_sql, join_type))
+                except Exception:
+                    # Best-effort: skip joins we cannot render.
+                    continue
+
             # Best-effort line range: search for the rendered SQL within the
             # original file text and compute 1-based line numbers.
             rendered = stmt.sql(dialect=self.dialect)
@@ -159,5 +199,7 @@ class SQLLineageAnalyzer:
                 line_range=(start_line, end_line) if start_line is not None and end_line is not None else None,
                 cte_names=cte_names,
                 read_columns={t: sorted(cols) for t, cols in read_cols.items()},
+                joins=joins,
+                cte_dependencies={name: sorted(deps) for name, deps in cte_dependencies.items()},
             )
 
