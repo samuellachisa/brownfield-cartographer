@@ -78,6 +78,10 @@ class DatasetNode(BaseModel):
     freshness_sla: Optional[str] = None
     owner: Optional[str] = None
     is_source_of_truth: bool = False
+    # Optional coarse-grained sensitivity tag so callers can answer questions
+    # like "which downstream pipelines touch PII?". This is intentionally
+    # loose; analyzers may leave it unset if they cannot infer a value.
+    sensitivity: Optional[Literal["low", "medium", "high", "restricted"]] = None
 
     @field_validator("name")
     @classmethod

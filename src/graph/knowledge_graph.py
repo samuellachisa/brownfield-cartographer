@@ -84,6 +84,7 @@ class KnowledgeGraph:
             dataset.name,
             type="dataset",
             storage_type=dataset.storage_type,
+            sensitivity=dataset.sensitivity,
         )
 
     def add_transformation(self, transform: TransformationNode) -> None:
@@ -97,16 +98,26 @@ class KnowledgeGraph:
             sql_query_if_applicable=transform.sql_query_if_applicable,
         )
         for src in transform.source_datasets:
+            src_sensitivity = self.lineage_graph.nodes.get(src, {}).get("sensitivity")
             self.lineage_graph.add_edge(
                 src,
                 tid,
                 type=LineageEdgeType.CONSUMES.value,
+                direction="read",
+                sensitivity=src_sensitivity,
+                source_file=transform.source_file,
+                line_range=transform.line_range,
             )
         for tgt in transform.target_datasets:
+            tgt_sensitivity = self.lineage_graph.nodes.get(tgt, {}).get("sensitivity")
             self.lineage_graph.add_edge(
                 tid,
                 tgt,
                 type=LineageEdgeType.PRODUCES.value,
+                direction="write",
+                sensitivity=tgt_sensitivity,
+                source_file=transform.source_file,
+                line_range=transform.line_range,
             )
 
     # ---- Blast radius / sources / sinks -----------------------------------------
@@ -116,30 +127,39 @@ class KnowledgeGraph:
         node: str,
         direction: Literal["upstream", "downstream"] = "downstream",
         max_depth: Optional[int] = None,
+        max_nodes: Optional[int] = None,
     ) -> nx.DiGraph:
         g = self.lineage_graph
         if node not in g:
             return nx.DiGraph()
-        visited = set()
-        frontier = {node}
-        depth = 0
-        while frontier:
+        from collections import deque
+
+        visited = set([node])
+        queue = deque([(node, 0)])
+
+        while queue:
+            current, depth = queue.popleft()
             if max_depth is not None and depth >= max_depth:
-                break
-            nxt = set()
-            for n in frontier:
-                if n in visited:
+                continue
+            neighbors = g.predecessors(current) if direction == "upstream" else g.successors(current)
+            for nb in neighbors:
+                if nb in visited:
                     continue
-                visited.add(n)
-                neighbors = g.predecessors(n) if direction == "upstream" else g.successors(n)
-                for m in neighbors:
-                    if m not in visited:
-                        nxt.add(m)
-            frontier = nxt
-            depth += 1
+                visited.add(nb)
+                if max_nodes is not None and len(visited) >= max_nodes:
+                    # Early stop once we reach the node budget; callers still
+                    # get a connected subgraph rooted at ``node``.
+                    return g.subgraph(visited).copy()
+                queue.append((nb, depth + 1))
+
         return g.subgraph(visited).copy()
 
-    def top_fanout_datasets(self, k: int = 10) -> List[Dict[str, Any]]:
+    def top_fanout_datasets(
+        self,
+        k: int = 10,
+        max_depth: Optional[int] = None,
+        max_nodes: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Return the top-k datasets with the largest downstream fan-out.
 
@@ -152,7 +172,12 @@ class KnowledgeGraph:
             if data.get("type") != "dataset":
                 continue
             # Count distinct downstream datasets reachable from this node.
-            sub = self.blast_radius(n, direction="downstream")
+            sub = self.blast_radius(
+                n,
+                direction="downstream",
+                max_depth=max_depth,
+                max_nodes=max_nodes,
+            )
             fanout = sum(1 for nn, dd in sub.nodes(data=True) if dd.get("type") == "dataset" and nn != n)
             scores.append({"name": n, "fanout": fanout})
         scores.sort(key=lambda x: x["fanout"], reverse=True)
@@ -164,6 +189,7 @@ class KnowledgeGraph:
         direction: Literal["upstream", "downstream"] = "downstream",
         max_depth: int = 10,
         top_k: int = 5,
+        max_paths: int = 5000,
     ) -> List[List[str]]:
         """
         Compute a few of the longest simple paths starting from ``node`` in the
@@ -177,14 +203,20 @@ class KnowledgeGraph:
             return []
 
         paths: List[List[str]] = []
+        paths_seen = 0
 
         def dfs(current: str, path: List[str], depth: int) -> None:
+            nonlocal paths_seen
+            if paths_seen >= max_paths:
+                return
             if depth >= max_depth:
                 paths.append(path[:])
+                paths_seen += 1
                 return
             neighbors = list(g.predecessors(current) if direction == "upstream" else g.successors(current))
             if not neighbors:
                 paths.append(path[:])
+                paths_seen += 1
                 return
             for nb in neighbors:
                 if nb in path:
@@ -228,7 +260,7 @@ class KnowledgeGraph:
         lineage_nodes = list(self.lineage_graph.nodes(data=True))
         lineage_edges = list(self.lineage_graph.edges(data=True))
         lineage_positions: Dict[str, Any] = {}
-        if lineage_nodes:
+        if lineage_nodes and len(lineage_nodes) <= 2000:
             # spring_layout returns positions in an arbitrary coordinate system;
             # callers are expected to normalize/scale for their viewport.
             lineage_positions = nx.spring_layout(self.lineage_graph, seed=42)
@@ -273,7 +305,7 @@ class KnowledgeGraph:
         nodes = list(self.lineage_graph.nodes(data=True))
         edges = list(self.lineage_graph.edges(data=True))
         positions: Dict[str, Any] = {}
-        if nodes:
+        if nodes and len(nodes) <= 2000:
             positions = nx.spring_layout(self.lineage_graph, seed=42)
 
         payload = {
