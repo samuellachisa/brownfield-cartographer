@@ -80,7 +80,23 @@ class TreeSitterAnalyzer:
         parser = Parser(lang)
 
         source = path.read_text(encoding="utf-8", errors="ignore")
-        tree = parser.parse(bytes(source, "utf8"))
+        try:
+            tree = parser.parse(bytes(source, "utf8"))
+        except Exception:
+            # Gracefully skip files that tree-sitter cannot parse instead of
+            # failing the entire analysis. Return an "empty" result with only
+            # LOC/comment stats so callers still get basic signals.
+            lines = [ln for ln in source.splitlines()]
+            loc = len([ln for ln in lines if ln.strip()])
+            comment_lines = [ln for ln in lines if ln.strip().startswith("#")]
+            comment_ratio = (len(comment_lines) / loc) if loc else 0.0
+            return ModuleAnalysisResult(
+                imports=[],
+                public_functions=[],
+                public_classes=[],
+                loc=loc,
+                comment_ratio=comment_ratio,
+            )
 
         imports: List[str] = []
         public_functions: List[str] = []
@@ -98,12 +114,31 @@ class TreeSitterAnalyzer:
                         name = source[name_node.start_byte : name_node.end_byte]
                         if not name.startswith("_"):
                             public_functions.append(name)
+                    # Capture a lightweight view of the parameter list to aid
+                    # later semantic enrichment.
+                    params = [
+                        source[c.start_byte : c.end_byte]
+                        for c in node.children
+                        if c.type == "parameters"
+                    ]
+                    if params:
+                        public_functions[-1] = f"{public_functions[-1]}{params[0]}"
                 if node.type == "class_definition":
                     name_node = next((c for c in node.children if c.type == "identifier"), None)
                     if name_node is not None:
                         name = source[name_node.start_byte : name_node.end_byte]
                         if not name.startswith("_"):
-                            public_classes.append(name)
+                            # Include simple inheritance info where present,
+                            # e.g. "MyClass(BaseClass)".
+                            bases = [
+                                source[c.start_byte : c.end_byte]
+                                for c in node.children
+                                if c.type == "argument_list"
+                            ]
+                            label = name
+                            if bases:
+                                label = f"{name}{bases[0]}"
+                            public_classes.append(label)
         elif lang_name == "sql":
             # For SQL we rely on sqlglot for rich structure, but we still
             # capture a lightweight structural summary of statements.

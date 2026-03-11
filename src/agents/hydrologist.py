@@ -37,126 +37,135 @@ class HydrologistAgent:
 
         # SQL lineage
         for path in repo_root.rglob("*.sql"):
-            rel = str(path.relative_to(repo_root))
-            if changed_files is not None and rel not in changed_files:
-                continue
-            for dep in self.sql.analyze_file(path):
-                if not dep.sources and not dep.targets:
+            try:
+                rel = str(path.relative_to(repo_root))
+                if changed_files is not None and rel not in changed_files:
                     continue
-                src_nodes: List[str] = []
-                tgt_nodes: List[str] = []
-                for s in dep.sources:
-                    if s not in datasets:
-                        datasets[s] = DatasetNode(
-                            name=s,
-                            storage_type="table",
-                            schema_snapshot=None,
-                            freshness_sla=None,
-                            owner=None,
-                            is_source_of_truth=False,
-                        )
-                        graph.add_dataset(datasets[s])
-                    src_nodes.append(s)
-                for t in dep.targets:
-                    if t not in datasets:
-                        datasets[t] = DatasetNode(
-                            name=t,
-                            storage_type="table",
-                            schema_snapshot=None,
-                            freshness_sla=None,
-                            owner=None,
-                            is_source_of_truth=False,
-                        )
-                        graph.add_dataset(datasets[t])
-                    tgt_nodes.append(t)
+                for dep in self.sql.analyze_file(path):
+                    if not dep.sources and not dep.targets:
+                        continue
+                    src_nodes: List[str] = []
+                    tgt_nodes: List[str] = []
+                    for s in dep.sources:
+                        if s not in datasets:
+                            datasets[s] = DatasetNode(
+                                name=s,
+                                storage_type="table",
+                                schema_snapshot=None,
+                                freshness_sla=None,
+                                owner=None,
+                                is_source_of_truth=False,
+                            )
+                            graph.add_dataset(datasets[s])
+                        src_nodes.append(s)
+                    for t in dep.targets:
+                        if t not in datasets:
+                            datasets[t] = DatasetNode(
+                                name=t,
+                                storage_type="table",
+                                schema_snapshot=None,
+                                freshness_sla=None,
+                                owner=None,
+                                is_source_of_truth=False,
+                            )
+                            graph.add_dataset(datasets[t])
+                        tgt_nodes.append(t)
 
-                transform = TransformationNode(
-                    source_datasets=src_nodes,
-                    target_datasets=tgt_nodes,
-                    transformation_type="sql",
-                    source_file=str(path),
-                    line_range=(1, 1),
-                    sql_query_if_applicable=dep.sql,
-                )
-                graph.add_transformation(transform)
+                    transform = TransformationNode(
+                        source_datasets=src_nodes,
+                        target_datasets=tgt_nodes,
+                        transformation_type="sql",
+                        source_file=str(path),
+                        line_range=dep.line_range or (1, 1),
+                        sql_query_if_applicable=dep.sql,
+                    )
+                    graph.add_transformation(transform)
+            except Exception as e:
+                print(f"[hydrologist] Skipping SQL file {path} due to error: {e}")
 
         # Python data operations lineage
         for path in repo_root.rglob("*.py"):
-            rel = str(path.relative_to(repo_root))
-            if changed_files is not None and rel not in changed_files:
-                continue
-            for dep in self.python.analyze_file(path):
-                if not dep.sources and not dep.targets:
+            try:
+                rel = str(path.relative_to(repo_root))
+                if changed_files is not None and rel not in changed_files:
+                    continue
+                for dep in self.python.analyze_file(path):
+                    if not dep.sources and not dep.targets:
+                        continue
+                    src_nodes: List[str] = []
+                    tgt_nodes: List[str] = []
+                    for s in dep.sources:
+                        if s not in datasets:
+                            datasets[s] = DatasetNode(
+                                name=s,
+                                storage_type="table",
+                                schema_snapshot=None,
+                                freshness_sla=None,
+                                owner=None,
+                                is_source_of_truth=False,
+                            )
+                            graph.add_dataset(datasets[s])
+                        src_nodes.append(s)
+                    for t in dep.targets:
+                        if t not in datasets:
+                            datasets[t] = DatasetNode(
+                                name=t,
+                                storage_type="table",
+                                schema_snapshot=None,
+                                freshness_sla=None,
+                                owner=None,
+                                is_source_of_truth=False,
+                            )
+                            graph.add_dataset(datasets[t])
+                        tgt_nodes.append(t)
+
+                    transform = TransformationNode(
+                        source_datasets=src_nodes,
+                        target_datasets=tgt_nodes,
+                        transformation_type="python",
+                        source_file=str(path),
+                        line_range=dep.location,
+                        sql_query_if_applicable=None,
+                    )
+                    graph.add_transformation(transform)
+            except Exception as e:
+                print(f"[hydrologist] Skipping Python file {path} due to error: {e}")
+
+        # YAML / config lineage (dbt / Airflow-style)
+        for path in repo_root.rglob("*.yml"):
+            try:
+                rel = str(path.relative_to(repo_root))
+                if changed_files is not None and rel not in changed_files:
+                    continue
+                cfg = self.dag_parser.parse(path)
+                if not cfg or not cfg.tasks:
                     continue
                 src_nodes: List[str] = []
                 tgt_nodes: List[str] = []
-                for s in dep.sources:
-                    if s not in datasets:
-                        datasets[s] = DatasetNode(
-                            name=s,
+                for task in cfg.tasks:
+                    if task not in datasets:
+                        datasets[task] = DatasetNode(
+                            name=task,
                             storage_type="table",
                             schema_snapshot=None,
                             freshness_sla=None,
                             owner=None,
                             is_source_of_truth=False,
                         )
-                        graph.add_dataset(datasets[s])
-                    src_nodes.append(s)
-                for t in dep.targets:
-                    if t not in datasets:
-                        datasets[t] = DatasetNode(
-                            name=t,
-                            storage_type="table",
-                            schema_snapshot=None,
-                            freshness_sla=None,
-                            owner=None,
-                            is_source_of_truth=False,
-                        )
-                        graph.add_dataset(datasets[t])
-                    tgt_nodes.append(t)
+                        graph.add_dataset(datasets[task])
+                    tgt_nodes.append(task)
 
                 transform = TransformationNode(
                     source_datasets=src_nodes,
                     target_datasets=tgt_nodes,
-                    transformation_type="python",
+                    transformation_type=cfg.config_type or "yaml",
                     source_file=str(path),
-                    line_range=dep.location,
+                    line_range=(1, 1),
                     sql_query_if_applicable=None,
                 )
                 graph.add_transformation(transform)
-
-        # YAML / config lineage (dbt / Airflow-style)
-        for path in repo_root.rglob("*.yml"):
-            rel = str(path.relative_to(repo_root))
-            if changed_files is not None and rel not in changed_files:
-                continue
-            cfg = self.dag_parser.parse(path)
-            if not cfg or not cfg.tasks:
-                continue
-            src_nodes: List[str] = []
-            tgt_nodes: List[str] = []
-            for task in cfg.tasks:
-                if task not in datasets:
-                    datasets[task] = DatasetNode(
-                        name=task,
-                        storage_type="table",
-                        schema_snapshot=None,
-                        freshness_sla=None,
-                        owner=None,
-                        is_source_of_truth=False,
-                    )
-                    graph.add_dataset(datasets[task])
-                tgt_nodes.append(task)
-
-            transform = TransformationNode(
-                source_datasets=src_nodes,
-                target_datasets=tgt_nodes,
-                transformation_type=cfg.config_type or "yaml",
-                source_file=str(path),
-                line_range=(1, 1),
-                sql_query_if_applicable=None,
-            )
-            graph.add_transformation(transform)
+            except Exception as e:
+                print(f"[hydrologist] Skipping YAML file {path} due to error: {e}")
 
         return datasets
 

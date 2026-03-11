@@ -2,11 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Any, Iterable, Literal
+from typing import Dict, Any, Iterable, Literal, Optional, List
 
 import networkx as nx
 
-from ..models import ModuleNode, DatasetNode, FunctionNode, TransformationNode
+from ..models import (
+    ModuleNode,
+    DatasetNode,
+    FunctionNode,
+    TransformationNode,
+    ModuleEdgeType,
+    LineageEdgeType,
+)
 
 
 @dataclass
@@ -34,20 +41,20 @@ class KnowledgeGraph:
     def add_import_edge(self, src: str, dst: str, weight: int = 1) -> None:
         data = self.module_graph.get_edge_data(src, dst, default={})
         new_weight = data.get("weight", 0) + weight
-        self.module_graph.add_edge(src, dst, type="IMPORTS", weight=new_weight)
+        self.module_graph.add_edge(src, dst, type=ModuleEdgeType.IMPORTS.value, weight=new_weight)
 
     def add_configures_edge(self, config_path: str, target: str, config_type: str) -> None:
         self.module_graph.add_edge(
             config_path,
             target,
-            type="CONFIGURES",
+            type=ModuleEdgeType.CONFIGURES.value,
             config_type=config_type,
         )
 
     def add_calls_edge(self, caller: str, callee: str, count: int = 1) -> None:
         data = self.module_graph.get_edge_data(caller, callee, default={})
         new_count = data.get("call_count", 0) + count
-        self.module_graph.add_edge(caller, callee, type="CALLS", call_count=new_count)
+        self.module_graph.add_edge(caller, callee, type=ModuleEdgeType.CALLS.value, call_count=new_count)
 
     def pagerank(self) -> Dict[str, float]:
         """
@@ -93,13 +100,13 @@ class KnowledgeGraph:
             self.lineage_graph.add_edge(
                 src,
                 tid,
-                type="CONSUMES",
+                type=LineageEdgeType.CONSUMES.value,
             )
         for tgt in transform.target_datasets:
             self.lineage_graph.add_edge(
                 tid,
                 tgt,
-                type="PRODUCES",
+                type=LineageEdgeType.PRODUCES.value,
             )
 
     # ---- Blast radius / sources / sinks -----------------------------------------
@@ -108,13 +115,17 @@ class KnowledgeGraph:
         self,
         node: str,
         direction: Literal["upstream", "downstream"] = "downstream",
+        max_depth: Optional[int] = None,
     ) -> nx.DiGraph:
         g = self.lineage_graph
         if node not in g:
             return nx.DiGraph()
         visited = set()
         frontier = {node}
+        depth = 0
         while frontier:
+            if max_depth is not None and depth >= max_depth:
+                break
             nxt = set()
             for n in frontier:
                 if n in visited:
@@ -125,7 +136,64 @@ class KnowledgeGraph:
                     if m not in visited:
                         nxt.add(m)
             frontier = nxt
+            depth += 1
         return g.subgraph(visited).copy()
+
+    def top_fanout_datasets(self, k: int = 10) -> List[Dict[str, Any]]:
+        """
+        Return the top-k datasets with the largest downstream fan-out.
+
+        This is useful for identifying high-blast-radius sinks or hubs in the
+        lineage graph.
+        """
+        g = self.lineage_graph
+        scores: List[Dict[str, Any]] = []
+        for n, data in g.nodes(data=True):
+            if data.get("type") != "dataset":
+                continue
+            # Count distinct downstream datasets reachable from this node.
+            sub = self.blast_radius(n, direction="downstream")
+            fanout = sum(1 for nn, dd in sub.nodes(data=True) if dd.get("type") == "dataset" and nn != n)
+            scores.append({"name": n, "fanout": fanout})
+        scores.sort(key=lambda x: x["fanout"], reverse=True)
+        return scores[:k]
+
+    def critical_paths_from(
+        self,
+        node: str,
+        direction: Literal["upstream", "downstream"] = "downstream",
+        max_depth: int = 10,
+        top_k: int = 5,
+    ) -> List[List[str]]:
+        """
+        Compute a few of the longest simple paths starting from ``node`` in the
+        requested direction, up to ``max_depth``.
+
+        This provides a concise view of critical pipelines for downstream
+        consumers without requiring them to run arbitrary graph algorithms.
+        """
+        g = self.lineage_graph
+        if node not in g:
+            return []
+
+        paths: List[List[str]] = []
+
+        def dfs(current: str, path: List[str], depth: int) -> None:
+            if depth >= max_depth:
+                paths.append(path[:])
+                return
+            neighbors = list(g.predecessors(current) if direction == "upstream" else g.successors(current))
+            if not neighbors:
+                paths.append(path[:])
+                return
+            for nb in neighbors:
+                if nb in path:
+                    continue
+                dfs(nb, path + [nb], depth + 1)
+
+        dfs(node, [node], 0)
+        paths.sort(key=len, reverse=True)
+        return paths[:top_k]
 
     def find_sources(self) -> Iterable[str]:
         g = self.lineage_graph

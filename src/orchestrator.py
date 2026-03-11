@@ -112,13 +112,38 @@ def run_analysis(
     # downstream tools can reason about structural importance.
     pr = kg.pagerank()
     scc = list(kg.strongly_connected_components())
+
+    # Derive a concise report of the "hottest" modules by combining structural
+    # centrality (PageRank) with recent git velocity. This is intentionally
+    # simple but provides a high-signal view of where risk and churn intersect.
+    hotspots = sorted(
+        (
+            {
+                "path": path,
+                "pagerank": float(pr.get(path, 0.0)),
+                "change_velocity_30d": int(mod.change_velocity_30d),
+            }
+            for path, mod in modules.items()
+        ),
+        key=lambda x: (x["pagerank"], x["change_velocity_30d"]),
+        reverse=True,
+    )[:10]
+
     traces.append(
         {
             "action": "surveyor_metrics",
             "pagerank_computed_for": len(pr),
             "scc_components": len(scc),
+            "hotspots": hotspots,
         }
     )
+    if hotspots:
+        print("[cartographer] Top modules by centrality and velocity:")
+        for h in hotspots:
+            print(
+                f"  - {h['path']}: pagerank={h['pagerank']:.4f}, "
+                f"changes_30d={h['change_velocity_30d']}"
+            )
 
     # Hydrologist
     print("[cartographer] Running Hydrologist (SQL lineage)...")

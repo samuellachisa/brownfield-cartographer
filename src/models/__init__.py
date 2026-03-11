@@ -6,5 +6,7 @@ from .nodes import (
     ModuleNode,
     TransformationNode,
     TraceEvent,
+    ModuleEdgeType,
+    LineageEdgeType,
 )  # noqa: F401
 

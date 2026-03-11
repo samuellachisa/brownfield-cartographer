@@ -36,64 +36,67 @@ class SurveyorAgent:
         modules: Dict[str, ModuleNode] = {}
 
         for path in self._iter_files(repo_root, changed_files):
-            language = self._language_for_path(path)
-            last_modified = self._last_modified(repo_root, path)
-            velocity = self._git_velocity(repo_root, path, self.config.days_for_velocity)
+            try:
+                language = self._language_for_path(path)
+                last_modified = self._last_modified(repo_root, path)
+                velocity = self._git_velocity(repo_root, path, self.config.days_for_velocity)
 
-            if language == "python":
-                analysis = self.analyzer.analyze_module(path)
-                complexity = float(analysis.loc)
-                module = ModuleNode(
-                    path=str(path.relative_to(repo_root)),
-                    language="python",
-                    purpose_statement=None,
-                    domain_cluster=None,
-                    complexity_score=complexity,
-                    change_velocity_30d=velocity,
-                    is_dead_code_candidate=False,
-                    last_modified=last_modified,
-                )
-                modules[module.path] = module
-                graph.add_module(module)
+                if language == "python":
+                    analysis = self.analyzer.analyze_module(path)
+                    complexity = float(analysis.loc)
+                    module = ModuleNode(
+                        path=str(path.relative_to(repo_root)),
+                        language="python",
+                        purpose_statement=None,
+                        domain_cluster=None,
+                        complexity_score=complexity,
+                        change_velocity_30d=velocity,
+                        is_dead_code_candidate=False,
+                        last_modified=last_modified,
+                    )
+                    modules[module.path] = module
+                    graph.add_module(module)
 
-                # Imports -> IMPORTS edges (string-level; resolution can be added later)
-                for imp in analysis.imports:
-                    graph.add_import_edge(module.path, imp, weight=1)
-                # Public classes could be surfaced later; for now they enrich
-                # the semantic index via ModuleAnalysisResult.
+                    # Imports -> IMPORTS edges (string-level; resolution can be added later)
+                    for imp in analysis.imports:
+                        graph.add_import_edge(module.path, imp, weight=1)
+                    # Public classes could be surfaced later; for now they enrich
+                    # the semantic index via ModuleAnalysisResult.
 
-            elif language == "yaml":
-                # YAML configs -> CONFIGURES edges
-                cfg = self.dag_parser.parse(path)
-                module = ModuleNode(
-                    path=str(path.relative_to(repo_root)),
-                    language="yaml",
-                    purpose_statement=None,
-                    domain_cluster=None,
-                    complexity_score=0.0,
-                    change_velocity_30d=velocity,
-                    is_dead_code_candidate=False,
-                    last_modified=last_modified,
-                )
-                modules[module.path] = module
-                graph.add_module(module)
-                if cfg:
-                    for task in cfg.tasks:
-                        graph.add_configures_edge(module.path, task, cfg.config_type)
+                elif language == "yaml":
+                    # YAML configs -> CONFIGURES edges
+                    cfg = self.dag_parser.parse(path)
+                    module = ModuleNode(
+                        path=str(path.relative_to(repo_root)),
+                        language="yaml",
+                        purpose_statement=None,
+                        domain_cluster=None,
+                        complexity_score=0.0,
+                        change_velocity_30d=velocity,
+                        is_dead_code_candidate=False,
+                        last_modified=last_modified,
+                    )
+                    modules[module.path] = module
+                    graph.add_module(module)
+                    if cfg:
+                        for task in cfg.tasks:
+                            graph.add_configures_edge(module.path, task, cfg.config_type)
 
-            else:
-                module = ModuleNode(
-                    path=str(path.relative_to(repo_root)),
-                    language=language,
-                    purpose_statement=None,
-                    domain_cluster=None,
-                    complexity_score=0.0,
-                    change_velocity_30d=velocity,
-                    is_dead_code_candidate=False,
-                    last_modified=last_modified,
-                )
-                modules[module.path] = module
-                graph.add_module(module)
+                else:
+                    module = ModuleNode(
+                        path=str(path.relative_to(repo_root)),
+                        language=language,
+                        purpose_statement=None,
+                        domain_cluster=None,
+                        complexity_score=0.0,
+                        change_velocity_30d=velocity,
+                        is_dead_code_candidate=False,
+                        last_modified=last_modified,
+                    )
+                    modules[module.path] = module
+                    graph.add_module(module)
+            except Exception as e:
+                print(f"[surveyor] Skipping file {path} due to error: {e}")
 
         return modules
 
