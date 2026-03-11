@@ -1,0 +1,52 @@
+{
+  "repos": [
+    {
+      "id": "cartographer_tijk_xvz",
+      "path": "/tmp/cartographer_tijk_xvz",
+      "status": "success",
+      "last_run_at": "2026-03-11T09:22:11.593620"
+    },
+    {
+      "id": "cartographer_y6kelxmk",
+      "path": "/tmp/cartographer_y6kelxmk",
+      "status": "success",
+      "last_run_at": "2026-03-11T09:38:04.708568"
+    },
+    {
+      "id": "cartographer_dfzsp3zm",
+      "path": "/tmp/cartographer_dfzsp3zm",
+      "status": "success",
+      "last_run_at": "2026-03-11T11:03:42.912366"
+    },
+    {
+      "id": "cartographer_ibzluuay",
+      "path": "/tmp/cartographer_ibzluuay",
+      "status": "success",
+      "last_run_at": "2026-03-11T11:39:16.660485"
+    },
+    {
+      "id": "cartographer_4vzgv8__",
+      "path": "/tmp/cartographer_4vzgv8__",
+      "status": "running",
+      "last_run_at": "2026-03-11T11:46:32.791440"
+    },
+    {
+      "id": "cartographer_nkidbw4u",
+      "path": "/tmp/cartographer_nkidbw4u",
+      "status": "running",
+      "last_run_at": "2026-03-11T11:52:16.170892"
+    },
+    {
+      "id": "cartographer_xm9blh15",
+      "path": "/tmp/cartographer_xm9blh15",
+      "status": "running",
+      "last_run_at": "2026-03-11T11:54:28.734910"
+    },
+    {
+      "id": "cartographer_tlpp13t4",
+      "path": "/tmp/cartographer_tlpp13t4",
+      "status": "success",
+      "last_run_at": "2026-03-11T12:10:13.599906"
+    }
+  ]
+}

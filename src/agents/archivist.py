@@ -22,14 +22,14 @@ class ArchivistAgent:
 
     def run(
         self,
-        repo_root: Path,
+        cart_path: Path,
         graph: KnowledgeGraph,
         modules: Dict[str, ModuleNode],
         datasets: Dict[str, DatasetNode],
         day_one_answers: Dict[str, DayOneAnswer],
         traces: List[Dict[str, Any]],
     ) -> None:
-        cart = get_cartography_dir(repo_root)
+        cart = cart_path
         cart.mkdir(parents=True, exist_ok=True)
 
         self._write_codebase_md(cart / "CODEBASE.md", graph, modules, datasets)

@@ -10,6 +10,7 @@ set -euo pipefail
 #   --local-only    Skip LLM (static analysis only)
 #   --analyze-only  Do not start the interactive shell after analysis
 #   --force         Re-run analysis even if cache exists
+#   --repo-id       Unique repo identifier for per-repo storage
 #
 # Examples:
 #   ./cartographer.sh .                          # analyze + shell on current repo
@@ -22,6 +23,7 @@ incremental=false
 local_only=false
 analyze_only=false
 force=false
+repo_id=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,6 +43,10 @@ while [[ $# -gt 0 ]]; do
       force=true
       shift
       ;;
+    --repo-id)
+      repo_id="$2"
+      shift 2
+      ;;
     -*)
       echo "Unknown option: $1" >&2
       exit 1
@@ -57,37 +63,34 @@ if [[ -z "${REPO:-}" ]]; then
   exit 1
 fi
 
-# Ensure cartographer is on PATH
-if ! command -v cartographer >/dev/null 2>&1; then
-  echo "cartographer CLI not found. Install this project from the root with:" >&2
-  echo "  pip install -e .    # or: pip install -r requirements.txt" >&2
-  exit 1
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+# Ensure env is set up
+if [ ! -d ".venv" ]; then
+  if command -v uv >/dev/null 2>&1; then
+    uv sync
+  else
+    echo "No .venv found and 'uv' is not installed. Please create a virtualenv and install deps first." >&2
+    echo "For example:" >&2
+    echo "  python -m venv .venv" >&2
+    echo "  source .venv/bin/activate" >&2
+    echo "  pip install -e ." >&2
+    exit 1
+  fi
 fi
 
-# Build analyze command
-analyze_cmd=(cartographer analyze "$REPO")
-$incremental && analyze_cmd+=("--incremental")
-$local_only && analyze_cmd+=("--local-only")
+# Build CLI args
+CLI_ARGS=("analyze" "$REPO")
+[[ "$incremental" == "true" ]] && CLI_ARGS+=("--incremental")
+[[ "$local_only" == "true" ]] && CLI_ARGS+=("--local-only")
+[[ -n "$repo_id" ]] && CLI_ARGS+=("--repo-id" "$repo_id")
 
-echo ">>> Running analysis: ${analyze_cmd[*]}"
-"${analyze_cmd[@]}"
-
-if $analyze_only; then
-  echo ">>> Analysis complete. Artifacts are in .cartography/ of the repo."
-  exit 0
-fi
-
-# For GitHub URLs, the CLI clones to a temp dir; for simplicity, drop into shell
-# on current working directory if REPO is not a local path.
-if [[ "$REPO" == https://github.com/* || "$REPO" == git@github.com:* ]]; then
-  SHELL_REPO="."
+# Always invoke via the module so we don't rely on the broken console script.
+if command -v uv >/dev/null 2>&1; then
+  uv run python -m src.cli "${CLI_ARGS[@]}"
 else
-  SHELL_REPO="$REPO"
+  source .venv/bin/activate
+  python -m src.cli "${CLI_ARGS[@]}"
 fi
-
-shell_cmd=(cartographer shell "$SHELL_REPO")
-$force && shell_cmd+=("--force")
-
-echo ">>> Starting interactive shell: ${shell_cmd[*]}"
-"${shell_cmd[@]}"
 

@@ -30,12 +30,14 @@ def _resolve_repo(repo: str) -> Path:
 
 def cmd_analyze(args: argparse.Namespace) -> None:
     repo_path = _resolve_repo(args.repo)
+    repo_id = getattr(args, 'repo_id', None)
     run_analysis(
         str(repo_path),
+        repo_id=repo_id,
         incremental=args.incremental,
         local_only=args.local_only,
     )
-    cart = get_cartography_dir(repo_path)
+    cart = get_cartography_dir(repo_path) if not repo_id else Path(__file__).resolve().parents[1] / ".cartography" / "repos" / repo_id
     print(f"Analysis complete. Artifacts: {cart}")
 
 
@@ -192,6 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_analyze = sub.add_parser("analyze", help="One-off analysis (for scripts)")
     p_analyze.add_argument("repo", help="Path to repo or GitHub URL")
+    p_analyze.add_argument("--repo-id", dest="repo_id", help="Unique repo identifier for per-repo storage")
     p_analyze.add_argument("--incremental", action="store_true")
     p_analyze.add_argument("--local-only", action="store_true")
     p_analyze.set_defaults(func=cmd_analyze)
@@ -200,7 +203,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    args_list = (argv or [])[:]
+    import sys
+    args_list = (argv if argv is not None else sys.argv[1:])[:]
     # Shortcut: cartographer /path -> shell with repo
     if args_list and args_list[0] not in ("shell", "analyze", "-h", "--help") and not args_list[0].startswith("-"):
         cmd_shell(argparse.Namespace(repo=args_list[0], force="--force" in args_list))

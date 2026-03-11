@@ -59,6 +59,8 @@ class SurveyorAgent:
                 # Imports -> IMPORTS edges (string-level; resolution can be added later)
                 for imp in analysis.imports:
                     graph.add_import_edge(module.path, imp, weight=1)
+                # Public classes could be surfaced later; for now they enrich
+                # the semantic index via ModuleAnalysisResult.
 
             elif language == "yaml":
                 # YAML configs -> CONFIGURES edges

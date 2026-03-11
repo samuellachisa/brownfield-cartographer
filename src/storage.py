@@ -22,6 +22,7 @@ class RunMetadata:
     timestamp: str
     incremental: bool = False
     changed_files: List[str] = field(default_factory=list)
+    status: str = "running"  # running | success | error
 
 
 def _git_head(repo_root: Path) -> Optional[str]:
@@ -52,13 +53,21 @@ def get_cartography_dir(repo_path: Path) -> Path:
     return Path(repo_path).resolve() / ".cartography"
 
 
-def get_runs_path(repo_path: Path) -> Path:
-    return get_cartography_dir(repo_path) / "runs.json"
+def get_repo_cart_dir(repo_id: str) -> Path:
+    """Get the per-repo cartography directory under .cartography/repos/<repo_id>."""
+    from pathlib import Path
+    project_root = Path(__file__).resolve().parents[1]
+    return project_root / ".cartography" / "repos" / repo_id
 
 
-def load_run_metadata(repo_path: Path) -> Optional[RunMetadata]:
-    """Load the most recent run metadata for a repo."""
-    path = get_runs_path(repo_path)
+def get_runs_path(cart_path: Path) -> Path:
+    """Get runs.json path from a cartography directory."""
+    return cart_path / "runs.json"
+
+
+def load_run_metadata(cart_path: Path) -> Optional[RunMetadata]:
+    """Load the most recent run metadata from a cartography directory."""
+    path = get_runs_path(cart_path)
     if not path.exists():
         return None
     try:
@@ -74,15 +83,16 @@ def load_run_metadata(repo_path: Path) -> Optional[RunMetadata]:
             timestamp=latest["timestamp"],
             incremental=latest.get("incremental", False),
             changed_files=latest.get("changed_files", []),
+            status=latest.get("status", "success"),
         )
     except Exception:
         return None
 
 
-def save_run_metadata(repo_path: Path, meta: RunMetadata) -> None:
-    cart = get_cartography_dir(repo_path)
-    cart.mkdir(parents=True, exist_ok=True)
-    path = get_runs_path(repo_path)
+def save_run_metadata(cart_path: Path, meta: RunMetadata) -> None:
+    """Save run metadata to a cartography directory."""
+    cart_path.mkdir(parents=True, exist_ok=True)
+    path = get_runs_path(cart_path)
     runs: List[Dict] = []
     if path.exists():
         try:
@@ -93,6 +103,39 @@ def save_run_metadata(repo_path: Path, meta: RunMetadata) -> None:
     runs.append(asdict(meta))
     path.write_text(json.dumps({"runs": runs}, indent=2), encoding="utf-8")
 
+    # Also update global repos registry so the UI can show this repo and status.
+    try:
+        project_root = Path(__file__).resolve().parents[1]
+        registry_path = project_root / "repos.json"
+        registry: Dict[str, Any] = {"repos": []}
+        if registry_path.exists():
+            try:
+                registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            except Exception:
+                registry = {"repos": []}
+        repos = registry.get("repos", [])
+        updated = False
+        for r in repos:
+            if r.get("path") == meta.repo_path:
+                r["status"] = meta.status
+                r["last_run_at"] = meta.timestamp
+                updated = True
+                break
+        if not updated:
+            repos.append(
+                {
+                    "id": Path(meta.repo_path).name,
+                    "path": meta.repo_path,
+                    "status": meta.status,
+                    "last_run_at": meta.timestamp,
+                }
+            )
+        registry["repos"] = repos
+        registry_path.write_text(json.dumps(registry, indent=2), encoding="utf-8")
+    except Exception:
+        # Registry is best-effort; ignore errors so analysis still succeeds.
+        pass
+
 
 def _serialize_datetime(obj: Any) -> str:
     if hasattr(obj, "isoformat"):
@@ -101,15 +144,15 @@ def _serialize_datetime(obj: Any) -> str:
 
 
 def save_state(
-    repo_path: Path,
+    cart_path: Path,
     graph: KnowledgeGraph,
     modules: Dict[str, ModuleNode],
     datasets: Dict[str, DatasetNode],
     day_one_answers: Optional[Dict[str, Any]] = None,
 ) -> None:
-    cart = get_cartography_dir(repo_path)
-    cart.mkdir(parents=True, exist_ok=True)
-    state_path = cart / "state.json"
+    """Save state to a cartography directory."""
+    cart_path.mkdir(parents=True, exist_ok=True)
+    state_path = cart_path / "state.json"
 
     modules_data = {k: m.model_dump(mode="json") for k, m in modules.items()}
     datasets_data = {k: d.model_dump(mode="json") for k, d in datasets.items()}
@@ -127,10 +170,10 @@ def save_state(
 
 
 def load_state(
-    repo_path: Path,
+    cart_path: Path,
 ) -> Optional[tuple[KnowledgeGraph, Dict[str, ModuleNode], Dict[str, DatasetNode], Dict[str, Any]]]:
-    """Load cached state. Returns None if not found or invalid."""
-    state_path = get_cartography_dir(repo_path) / "state.json"
+    """Load cached state from a cartography directory. Returns None if not found or invalid."""
+    state_path = cart_path / "state.json"
     if not state_path.exists():
         return None
     try:

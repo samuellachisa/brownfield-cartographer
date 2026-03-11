@@ -52,10 +52,17 @@ class KnowledgeGraph:
     def pagerank(self) -> Dict[str, float]:
         """
         Compute PageRank over the module graph to identify structurally critical modules.
+
+        The result is also written back onto node attributes as ``pagerank`` for
+        downstream consumers (e.g. UI, NavigatorAgent).
         """
         if not self.module_graph.nodes:
             return {}
-        return nx.pagerank(self.module_graph)
+        scores = nx.pagerank(self.module_graph)
+        for node, score in scores.items():
+            if node in self.module_graph.nodes:
+                self.module_graph.nodes[node]["pagerank"] = float(score)
+        return scores
 
     def strongly_connected_components(self) -> Iterable[set[str]]:
         """
@@ -148,14 +155,38 @@ class KnowledgeGraph:
     # ---- Serialization -----------------------------------------------------------
 
     def to_json(self) -> Dict[str, Any]:
+        # Compute a layout for the lineage graph so UIs can render a stable
+        # visualization without re-running a layout algorithm client-side.
+        lineage_nodes = list(self.lineage_graph.nodes(data=True))
+        lineage_edges = list(self.lineage_graph.edges(data=True))
+        lineage_positions: Dict[str, Any] = {}
+        if lineage_nodes:
+            # spring_layout returns positions in an arbitrary coordinate system;
+            # callers are expected to normalize/scale for their viewport.
+            lineage_positions = nx.spring_layout(self.lineage_graph, seed=42)
+
         return {
             "module_graph": {
                 "nodes": [{"id": n, **data} for n, data in self.module_graph.nodes(data=True)],
                 "edges": [{"source": u, "target": v, **data} for u, v, data in self.module_graph.edges(data=True)],
             },
             "lineage_graph": {
-                "nodes": [{"id": n, **data} for n, data in self.lineage_graph.nodes(data=True)],
-                "edges": [{"source": u, "target": v, **data} for u, v, data in self.lineage_graph.edges(data=True)],
+                "nodes": [
+                    {
+                        "id": n,
+                        **data,
+                        **(
+                            {
+                                "x": float(lineage_positions[n][0]),
+                                "y": float(lineage_positions[n][1]),
+                            }
+                            if n in lineage_positions
+                            else {}
+                        ),
+                    }
+                    for n, data in lineage_nodes
+                ],
+                "edges": [{"source": u, "target": v, **data} for u, v, data in lineage_edges],
             },
         }
 
@@ -171,9 +202,29 @@ class KnowledgeGraph:
     def write_lineage_graph(self, path: Path) -> None:
         import json
 
+        nodes = list(self.lineage_graph.nodes(data=True))
+        edges = list(self.lineage_graph.edges(data=True))
+        positions: Dict[str, Any] = {}
+        if nodes:
+            positions = nx.spring_layout(self.lineage_graph, seed=42)
+
         payload = {
-            "nodes": [{"id": n, **data} for n, data in self.lineage_graph.nodes(data=True)],
-            "edges": [{"source": u, "target": v, **data} for u, v, data in self.lineage_graph.edges(data=True)],
+            "nodes": [
+                {
+                    "id": n,
+                    **data,
+                    **(
+                        {
+                            "x": float(positions[n][0]),
+                            "y": float(positions[n][1]),
+                        }
+                        if n in positions
+                        else {}
+                    ),
+                }
+                for n, data in nodes
+            ],
+            "edges": [{"source": u, "target": v, **data} for u, v, data in edges],
         }
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 

@@ -10,22 +10,14 @@ from .models import ModuleNode
 
 
 def _get_embedder():
-    """Lazy load embedder - try OpenAI, fallback to sklearn TF-IDF."""
-    try:
-        import os
-        from openai import OpenAI
-        key = os.getenv("OPENAI_API_KEY", "")
-        if key:
-            client = OpenAI(api_key=key)
-            def _embed(texts: List[str]) -> List[List[float]]:
-                r = client.embeddings.create(
-                    model=os.getenv("CARTOGRAPHER_EMBEDDING_MODEL", "text-embedding-3-small"),
-                    input=texts,
-                )
-                return [d.embedding for d in r.data]
-            return _embed
-    except Exception:
-        pass
+    """Lazy load embedder - try OpenAI-compatible API, fallback to sklearn TF-IDF.
+
+    If LLM_API_BASE points to a non-OpenAI-compatible embeddings endpoint (e.g. Groq),
+    or if the embeddings call fails (404 model, etc.), we transparently fall back
+    to local TF-IDF so the shell still works.
+    """
+    import os
+
     # Fallback: TF-IDF as dense vector (no external API)
     def _tfidf_embed(texts: List[str]) -> List[List[float]]:
         try:
@@ -35,7 +27,32 @@ def _get_embedder():
             return X.toarray().tolist()
         except Exception:
             return [[0.0] * 384 for _ in texts]
-    return _tfidf_embed
+
+    try:
+        from openai import OpenAI
+        key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+        base_url = os.getenv("LLM_API_BASE") or os.getenv("CARTOGRAPHER_LLM_BASE_URL")
+
+        # If we're clearly pointing at Groq or another non-embeddings provider, skip API embeddings.
+        if not key or (base_url and "api.groq.com" in base_url):
+            return _tfidf_embed
+
+        client = OpenAI(api_key=key, base_url=base_url or None)
+
+        def _embed(texts: List[str]) -> List[List[float]]:
+            try:
+                r = client.embeddings.create(
+                    model=os.getenv("CARTOGRAPHER_EMBEDDING_MODEL", "text-embedding-3-small"),
+                    input=texts,
+                )
+                return [d.embedding for d in r.data]
+            except Exception:
+                # Any failure (404 model, network, etc.) → fallback to TF-IDF
+                return _tfidf_embed(texts)
+
+        return _embed
+    except Exception:
+        return _tfidf_embed
 
 
 class SemanticIndex:

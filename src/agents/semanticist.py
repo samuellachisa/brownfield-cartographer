@@ -38,21 +38,29 @@ class ContextWindowBudget:
         self.used_synthesis += tokens
 
 
+def _env(key: str, fallback_key: str | None, default: str = "") -> str:
+    v = os.getenv(key, default)
+    if v or not fallback_key:
+        return v
+    return os.getenv(fallback_key, default)
+
+
 @dataclass
 class LLMConfig:
     """
     Generic LLM configuration driven by environment variables.
 
-    - OPENAI_API_KEY: API key for OpenAI or any OpenAI-compatible endpoint.
-    - CARTOGRAPHER_LLM_MODEL: model name (e.g. gpt-4o-mini, openrouter/mistral).
-    - CARTOGRAPHER_LLM_BASE_URL: optional base URL for OpenAI-compatible APIs
-      (e.g. https://openrouter.ai/api/v1).
+    Supported env vars (alternatives in parentheses):
+    - API key: LLM_API_KEY or OPENAI_API_KEY
+    - Model: LLM_TEXT_MODEL or CARTOGRAPHER_LLM_MODEL
+    - Base URL: LLM_API_BASE or CARTOGRAPHER_LLM_BASE_URL
+    - RPM: CARTOGRAPHER_LLM_RPM
     """
 
-    api_key: str = os.getenv("OPENAI_API_KEY", "")
-    model: str = os.getenv("CARTOGRAPHER_LLM_MODEL", "gpt-4o-mini")
-    base_url: str | None = os.getenv("CARTOGRAPHER_LLM_BASE_URL") or None
-    requests_per_minute: float = float(os.getenv("CARTOGRAPHER_LLM_RPM", "60"))
+    api_key: str = field(default_factory=lambda: _env("LLM_API_KEY", "OPENAI_API_KEY"))
+    model: str = field(default_factory=lambda: _env("LLM_TEXT_MODEL", "CARTOGRAPHER_LLM_MODEL", "gpt-4o-mini"))
+    base_url: str | None = field(default_factory=lambda: os.getenv("LLM_API_BASE") or os.getenv("CARTOGRAPHER_LLM_BASE_URL") or None)
+    requests_per_minute: float = field(default_factory=lambda: float(os.getenv("CARTOGRAPHER_LLM_RPM", "60")))
 
 
 class LLMClient:
@@ -65,7 +73,7 @@ class LLMClient:
         self.config = config
         if not self.config.api_key:
             raise RuntimeError(
-                "OPENAI_API_KEY is not set. Provide an API key for your LLM provider."
+                "LLM API key is not set. Set LLM_API_KEY or OPENAI_API_KEY in .env."
             )
         try:
             from openai import OpenAI  # type: ignore
