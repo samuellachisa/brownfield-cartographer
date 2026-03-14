@@ -6,7 +6,7 @@ import json
 import logging
 import sys
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 def _serialize(obj: Any) -> Any:
@@ -60,3 +60,25 @@ def setup_logging(verbose: bool = False, json_logs: bool = False) -> None:
 
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(f"cartographer.{name}")
+
+
+def log_file_skip(
+    logger: logging.Logger,
+    agent: str,
+    file_path: str,
+    error: Exception,
+    run_id: Optional[str] = None,
+    error_collector: Optional[list] = None,
+) -> None:
+    """Log a skipped file and optionally collect for traces."""
+    msg = str(error)
+    extra: Dict[str, Any] = {"agent": agent, "file": file_path, "error": msg}
+    if run_id:
+        extra["run_id"] = run_id
+    logger.warning("Skipping file due to error: %s", msg, extra=extra)
+    if error_collector is not None:
+        error_collector.append({
+            "agent": agent,
+            "file": file_path,
+            "error": msg,
+        })

@@ -29,6 +29,13 @@ class ModuleNode(BaseModel):
     out_degree: int = 0
     last_modified: datetime
     doc_drift: Optional[Literal["aligned", "outdated", "contradictory", "missing"]] = None
+    # Extended analysis metrics
+    cyclomatic_complexity: Optional[float] = None
+    import_depth: Optional[int] = None
+    coupling_score: Optional[int] = None
+    file_age_days: Optional[float] = None
+    has_explicit_exports: bool = False
+    has_test_file: bool = False
 
     @field_validator("complexity_score")
     @classmethod

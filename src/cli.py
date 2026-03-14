@@ -13,6 +13,7 @@ load_dotenv()
 from .agents.navigator import NavigatorAgent
 from .graph.knowledge_graph import KnowledgeGraph
 from .orchestrator import run_analysis
+from .utils.logging import setup_logging
 from .semantic_index import SemanticIndex
 from .storage import get_cartography_dir, load_state
 
@@ -73,6 +74,12 @@ def cmd_query(args: argparse.Namespace) -> None:
         out = {"answer": sorted(kg.find_sources())}
     elif args.tool == "sinks":
         out = {"answer": sorted(kg.find_sinks())}
+    elif args.tool == "what_breaks":
+        out = kg.what_breaks_if_table_changes(args.dataset or args.table or "")
+    elif args.tool == "upstream":
+        out = kg.upstream_sources_for(args.dataset or args.table or "")
+    elif args.tool == "impact":
+        out = kg.impact_summary(args.dataset or args.table or "")
     else:
         raise SystemExit(f"Unknown tool: {args.tool}")
 
@@ -105,8 +112,13 @@ def _route_ask(
             if w.lower() in ("of", "for") and i + 1 < len(words):
                 ds = words[i + 1].strip("'\"").replace("`", "")
                 return nav.trace_lineage(kg, ds, "downstream")
-    # "blast radius of X" / "what breaks if X"
+    # "blast radius of X" / "what breaks if X" - try table (lineage) first, then module
     if "blast" in q or "break" in q:
+        for ds in list(kg.lineage_graph.nodes()):
+            if kg.lineage_graph.nodes.get(ds, {}).get("type") == "dataset" and (
+                ds.lower() in q or ds.split(".")[-1].lower() in q
+            ):
+                return kg.impact_summary(ds)
         for path in modules:
             if path.split("/")[-1].lower() in q or path in question:
                 return nav.blast_radius(kg, path, modules)
@@ -132,7 +144,7 @@ def cmd_shell(args: argparse.Namespace) -> None:
     help_msg = (
         "Commands: analyze [--incremental] [--local-only] | ask \"<question>\" | "
         "find <concept> | lineage <dataset> [up|down] | blast <path> | explain <path> | "
-        "sources | sinks | quit"
+        "what_breaks <table> | upstream <table> | impact <table> | sources | sinks | quit"
     )
     print(f"Cartographer shell @ {repo_path}\n{help_msg}\n")
     while True:
@@ -178,6 +190,15 @@ def cmd_shell(args: argparse.Namespace) -> None:
             print(list(kg.find_sources()))
         elif cmd == "sinks":
             print(list(kg.find_sinks()))
+        elif cmd == "what_breaks":
+            out = kg.what_breaks_if_table_changes(arg)
+            print(json.dumps(out, indent=2, default=str))
+        elif cmd == "upstream":
+            out = kg.upstream_sources_for(arg)
+            print(json.dumps(out, indent=2, default=str))
+        elif cmd == "impact":
+            out = kg.impact_summary(arg)
+            print(json.dumps(out, indent=2, default=str))
         else:
             print(help_msg)
 
@@ -211,11 +232,14 @@ def build_parser() -> argparse.ArgumentParser:
             "explain_module",
             "sources",
             "sinks",
+            "what_breaks",
+            "upstream",
+            "impact",
         ],
         help="Navigator tool to run",
     )
     p_query.add_argument("--concept", help="Concept to search for (find_implementation)")
-    p_query.add_argument("--dataset", help="Dataset name (trace_lineage)")
+    p_query.add_argument("--dataset", "--table", dest="dataset", help="Dataset/table name (trace_lineage, what_breaks, upstream, impact)")
     p_query.add_argument(
         "--direction",
         choices=["upstream", "downstream"],
@@ -235,6 +259,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     import sys
+
+    setup_logging()
     args_list = (argv if argv is not None else sys.argv[1:])[:]
     # Shortcut: cartographer /path -> shell with repo
     if args_list and args_list[0] not in ("shell", "analyze", "-h", "--help") and not args_list[0].startswith("-"):

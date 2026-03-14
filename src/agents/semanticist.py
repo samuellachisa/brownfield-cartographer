@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
+from ..utils.logging import get_logger
+
 from ..graph.knowledge_graph import KnowledgeGraph
 from ..models import DayOneAnswer, Evidence, ModuleNode
 from ..config import CartographerConfig, load_config
@@ -171,7 +173,12 @@ class SemanticistAgent:
                 continue
         return redacted
 
-    def run(self, repo_root: Path, modules: Dict[str, ModuleNode]) -> None:
+    def run(
+        self,
+        repo_root: Path,
+        modules: Dict[str, ModuleNode],
+        error_collector: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
         # If no API key is set, treat as a no-op so the rest of the pipeline still works.
         if not self._llm_config.api_key:
             return
@@ -212,9 +219,19 @@ class SemanticistAgent:
                 break
             try:
                 purpose = client.summarize_module(module.path, snippet)
-            except Exception:
-                # Fail-soft: keep the rest of the pipeline intact even if some
-                # LLM calls fail (e.g. rate limits, network issues).
+            except Exception as e:
+                get_logger("semanticist").warning(
+                    "Skipping module (LLM failed): %s - %s",
+                    module.path,
+                    e,
+                    extra={"agent": "semanticist", "file": module.path, "error": str(e)},
+                )
+                if error_collector is not None:
+                    error_collector.append({
+                        "agent": "semanticist",
+                        "file": module.path,
+                        "error": str(e),
+                    })
                 continue
             self._budget.record_bulk(est_tokens)
             if purpose:

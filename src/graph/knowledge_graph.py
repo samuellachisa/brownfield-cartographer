@@ -252,6 +252,146 @@ class KnowledgeGraph:
             if not outgoing_consumes:
                 yield n
 
+    # ---- Convenience APIs for FDE questions --------------------------------------
+
+    def what_breaks_if_table_changes(
+        self,
+        table: str,
+        max_depth: Optional[int] = None,
+        max_nodes: Optional[int] = 500,
+    ) -> Dict[str, Any]:
+        """
+        Answer: "What breaks if table X changes?"
+        Returns downstream datasets and transformations affected.
+        """
+        if table not in self.lineage_graph:
+            return {
+                "table": table,
+                "found": False,
+                "impacted_datasets": [],
+                "impacted_transformations": [],
+                "evidence": [],
+            }
+        sub = self.blast_radius(
+            table,
+            direction="downstream",
+            max_depth=max_depth,
+            max_nodes=max_nodes,
+        )
+        datasets = [n for n, d in sub.nodes(data=True) if d.get("type") == "dataset" and n != table]
+        transforms = [
+            {"id": n, "source_file": d.get("source_file"), "line_range": d.get("line_range")}
+            for n, d in sub.nodes(data=True)
+            if d.get("type") == "transformation"
+        ]
+        evidence = []
+        for _, _, edata in sub.edges(data=True):
+            if edata.get("source_file"):
+                evidence.append({
+                    "file": edata["source_file"],
+                    "line_range": edata.get("line_range", (0, 0)),
+                })
+        return {
+            "table": table,
+            "found": True,
+            "impacted_datasets": sorted(datasets),
+            "impacted_transformations": transforms,
+            "dataset_count": len(datasets),
+            "transformation_count": len(transforms),
+            "evidence": evidence[:50],
+        }
+
+    def upstream_sources_for(
+        self,
+        table: str,
+        max_depth: Optional[int] = None,
+        max_nodes: Optional[int] = 500,
+    ) -> Dict[str, Any]:
+        """
+        Answer: "What feeds table X?"
+        Returns upstream datasets and transformations.
+        """
+        if table not in self.lineage_graph:
+            return {
+                "table": table,
+                "found": False,
+                "source_datasets": [],
+                "source_transformations": [],
+                "evidence": [],
+            }
+        sub = self.blast_radius(
+            table,
+            direction="upstream",
+            max_depth=max_depth,
+            max_nodes=max_nodes,
+        )
+        datasets = [n for n, d in sub.nodes(data=True) if d.get("type") == "dataset" and n != table]
+        transforms = [
+            {"id": n, "source_file": d.get("source_file"), "line_range": d.get("line_range")}
+            for n, d in sub.nodes(data=True)
+            if d.get("type") == "transformation"
+        ]
+        evidence = []
+        for _, _, edata in sub.edges(data=True):
+            if edata.get("source_file"):
+                evidence.append({
+                    "file": edata["source_file"],
+                    "line_range": edata.get("line_range", (0, 0)),
+                })
+        return {
+            "table": table,
+            "found": True,
+            "source_datasets": sorted(datasets),
+            "source_transformations": transforms,
+            "evidence": evidence[:50],
+        }
+
+    def impact_summary(
+        self,
+        table: str,
+        max_depth: Optional[int] = 20,
+    ) -> Dict[str, Any]:
+        """
+        Answer: "What is the blast radius for table X?"
+        Returns counts plus a human-readable narrative.
+        """
+        down = self.what_breaks_if_table_changes(table, max_depth=max_depth)
+        up = self.upstream_sources_for(table, max_depth=max_depth)
+        if not down["found"] and not up["found"]:
+            return {
+                "table": table,
+                "found": False,
+                "narrative": f"Table '{table}' not found in lineage graph.",
+                "dataset_count": 0,
+                "transformation_count": 0,
+            }
+        ds_down = down.get("dataset_count", 0)
+        tf_down = down.get("transformation_count", 0)
+        ds_up = up.get("dataset_count", 0)
+        tf_up = up.get("transformation_count", 0)
+        parts = []
+        if ds_down or tf_down:
+            parts.append(
+                f"If '{table}' changes: {ds_down} downstream dataset(s) and "
+                f"{tf_down} transformation(s) are affected."
+            )
+        if ds_up or tf_up:
+            parts.append(
+                f"Upstream: {ds_up} source dataset(s) and {tf_up} transformation(s) feed into it."
+            )
+        narrative = " ".join(parts) if parts else f"Table '{table}' has no lineage edges."
+        return {
+            "table": table,
+            "found": True,
+            "narrative": narrative,
+            "downstream_dataset_count": ds_down,
+            "downstream_transformation_count": tf_down,
+            "upstream_dataset_count": ds_up,
+            "upstream_transformation_count": tf_up,
+            "impacted_datasets": down.get("impacted_datasets", []),
+            "source_datasets": up.get("source_datasets", []),
+        }
+
     # ---- Serialization -----------------------------------------------------------
 
     def to_json(self) -> Dict[str, Any]:

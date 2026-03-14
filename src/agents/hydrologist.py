@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from ..analyzers.sql_lineage import SQLLineageAnalyzer
+from ..utils.logging import get_logger, log_file_skip
 from ..analyzers.python_lineage import PythonLineageAnalyzer
 from ..analyzers.dag_config_parser import DAGConfigParser
 from ..analyzers.notebook_lineage import NotebookLineageAnalyzer
@@ -36,6 +37,7 @@ class HydrologistAgent:
         repo_root: Path,
         graph: KnowledgeGraph,
         changed_files: Optional[Set[str]] = None,
+        error_collector: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, DatasetNode]:
         cfg = self._global_config or load_config(repo_root)
         datasets: Dict[str, DatasetNode] = {}
@@ -88,7 +90,13 @@ class HydrologistAgent:
                     )
                     graph.add_transformation(transform)
             except Exception as e:
-                print(f"[hydrologist] Skipping SQL file {path} due to error: {e}")
+                log_file_skip(
+                    get_logger("hydrologist"),
+                    "hydrologist",
+                    str(path.relative_to(repo_root)),
+                    e,
+                    error_collector=error_collector,
+                )
 
         # Python data operations lineage
         for path in repo_root.rglob("*.py"):
@@ -136,7 +144,13 @@ class HydrologistAgent:
                     )
                     graph.add_transformation(transform)
             except Exception as e:
-                print(f"[hydrologist] Skipping Python file {path} due to error: {e}")
+                log_file_skip(
+                    get_logger("hydrologist"),
+                    "hydrologist",
+                    str(path.relative_to(repo_root)),
+                    e,
+                    error_collector=error_collector,
+                )
 
         # YAML / config lineage (dbt / Airflow-style)
         for path in repo_root.rglob("*.yml"):
@@ -203,7 +217,13 @@ class HydrologistAgent:
                     )
                     graph.add_transformation(transform)
             except Exception as e:
-                print(f"[hydrologist] Skipping YAML file {path} due to error: {e}")
+                log_file_skip(
+                    get_logger("hydrologist"),
+                    "hydrologist",
+                    str(path.relative_to(repo_root)),
+                    e,
+                    error_collector=error_collector,
+                )
 
         # Notebook lineage (.ipynb)
         for path in repo_root.rglob("*.ipynb"):
@@ -251,7 +271,13 @@ class HydrologistAgent:
                     )
                     graph.add_transformation(transform)
             except Exception as e:
-                print(f"[hydrologist] Skipping notebook file {path} due to error: {e}")
+                log_file_skip(
+                    get_logger("hydrologist"),
+                    "hydrologist",
+                    str(path.relative_to(repo_root)),
+                    e,
+                    error_collector=error_collector,
+                )
 
         return datasets
 

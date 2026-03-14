@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 from .agents.archivist import ArchivistAgent
+from .utils.logging import get_logger, setup_logging
 from .agents.day_one import answer_day_one_questions
 from .agents.hydrologist import HydrologistAgent
 from .agents.semanticist import SemanticistAgent
@@ -50,9 +51,12 @@ def run_analysis(
     If incremental and prior run exists, only re-analyze changed files.
     If local_only, skip LLM (Semanticist, Day-One synthesis).
     """
+    setup_logging()
+    log = get_logger("orchestrator")
     root = Path(repo).resolve()
-    print(f"[cartographer] Starting analysis for repo: {root}")
-    
+    run_id = str(uuid.uuid4())[:8]
+    log.info("Starting analysis for repo: %s", root, extra={"run_id": run_id})
+
     # Use per-repo directory if repo_id provided, otherwise fall back to old behavior
     if repo_id:
         cart = get_repo_cart_dir(repo_id)
@@ -61,7 +65,6 @@ def run_analysis(
     cart.mkdir(parents=True, exist_ok=True)
 
     traces: List[Dict] = []
-    run_id = str(uuid.uuid4())[:8]
     commit_sha = _git_head(root)
     traces.append({
         "action": "pipeline_start",
@@ -106,13 +109,15 @@ def run_analysis(
             })
             if not changed_files:
                 traces.append({"action": "incremental_skip", "reason": "no changes"})
-                print("[cartographer] Incremental mode: no changed files since last run, skipping.")
+                log.info("Incremental mode: no changed files since last run, skipping.", extra={"run_id": run_id})
                 return OrchestratorResult(kg, modules, datasets, day_one_answers, None)
 
+    error_collector: List[Dict] = []
+
     # Surveyor
-    print("[cartographer] Running Surveyor (module analysis)...")
+    log.info("Running Surveyor (module analysis)...", extra={"run_id": run_id, "agent": "surveyor"})
     surveyor = SurveyorAgent()
-    new_modules = surveyor.run(root, kg, changed_files)
+    new_modules = surveyor.run(root, kg, changed_files, error_collector=error_collector)
     if not modules:
         modules = new_modules
     else:
@@ -122,13 +127,22 @@ def run_analysis(
     for m in modules.values():
         lang = getattr(m, "language", "other")
         files_by_lang[lang] = files_by_lang.get(lang, 0) + 1
+    surveyor_skipped = [e for e in error_collector if e.get("agent") == "surveyor"]
     traces.append({
         "action": "surveyor",
+        "run_id": run_id,
         "modules_count": len(modules),
         "files_by_language": files_by_lang,
         "files_total": sum(files_by_lang.values()),
+        "skipped_files_count": len(surveyor_skipped),
+        "skipped_files": surveyor_skipped[:20],
     })
-    print(f"[cartographer] Surveyor complete. Modules analyzed: {len(modules)}")
+    log.info(
+        "Surveyor complete. Modules: %d, skipped: %d",
+        len(modules),
+        len(surveyor_skipped),
+        extra={"run_id": run_id, "agent": "surveyor"},
+    )
 
     # Derive a concise report of the "hottest" modules by combining structural
     # centrality (PageRank computed in Surveyor) with recent git velocity.
@@ -154,17 +168,16 @@ def run_analysis(
         }
     )
     if hotspots:
-        print("[cartographer] Top modules by centrality and velocity:")
-        for h in hotspots:
-            print(
-                f"  - {h['path']}: pagerank={h['pagerank']:.4f}, "
-                f"changes_30d={h['change_velocity_30d']}"
-            )
+        log.info(
+            "Top modules by centrality and velocity: %s",
+            [h["path"] for h in hotspots],
+            extra={"run_id": run_id},
+        )
 
     # Hydrologist
-    print("[cartographer] Running Hydrologist (SQL lineage)...")
+    log.info("Running Hydrologist (lineage)...", extra={"run_id": run_id, "agent": "hydrologist"})
     hydrologist = HydrologistAgent()
-    new_datasets = hydrologist.run(root, kg, changed_files)
+    new_datasets = hydrologist.run(root, kg, changed_files, error_collector=error_collector)
     if not datasets:
         datasets = new_datasets
     else:
@@ -178,29 +191,42 @@ def run_analysis(
     for n, d in kg.lineage_graph.nodes(data=True):
         if sf := d.get("source_file"):
             source_files.add(sf)
+    hydrologist_skipped = [e for e in error_collector if e.get("agent") == "hydrologist"]
     traces.append({
         "action": "hydrologist",
+        "run_id": run_id,
         "datasets_count": len(datasets),
         "transformations_count": len(transformations),
         "source_files_analyzed": len(source_files),
+        "skipped_files_count": len(hydrologist_skipped),
+        "skipped_files": hydrologist_skipped[:20],
     })
-    print(f"[cartographer] Hydrologist complete. Datasets discovered: {len(datasets)}")
+    log.info(
+        "Hydrologist complete. Datasets: %d, skipped: %d",
+        len(datasets),
+        len(hydrologist_skipped),
+        extra={"run_id": run_id, "agent": "hydrologist"},
+    )
 
     # Semanticist (LLM) and Day-One
     if not local_only:
-        print("[cartographer] Running Semanticist (LLM enrichment)...")
+        log.info("Running Semanticist (LLM enrichment)...", extra={"run_id": run_id, "agent": "semanticist"})
         semanticist = SemanticistAgent()
-        semanticist.run(root, modules)
+        semanticist.run(root, modules, error_collector=error_collector)
         modules_with_purpose = sum(1 for m in modules.values() if getattr(m, "purpose_statement", None))
         modules_with_drift = sum(1 for m in modules.values() if getattr(m, "doc_drift", None))
+        semanticist_skipped = [e for e in error_collector if e.get("agent") == "semanticist"]
         traces.append({
             "action": "semanticist",
+            "run_id": run_id,
             "modules_with_purpose": modules_with_purpose,
             "modules_drift_checked": modules_with_drift,
             "modules_total": len(modules),
+            "skipped_modules_count": len(semanticist_skipped),
+            "skipped_modules": semanticist_skipped[:20],
         })
     else:
-        print("[cartographer] Skipping Semanticist (local-only mode).")
+        log.info("Skipping Semanticist (local-only mode).", extra={"run_id": run_id})
     day_one_answers = answer_day_one_questions(kg, modules, datasets)
     total_evidence = sum(len(a.evidence) for a in day_one_answers.values())
     traces.append({
@@ -209,10 +235,10 @@ def run_analysis(
         "evidence_citations_total": total_evidence,
         "questions": list(day_one_answers.keys()),
     })
-    print("[cartographer] Day-One onboarding answers synthesized.")
+    log.info("Day-One onboarding answers synthesized.", extra={"run_id": run_id})
 
     # Archivist
-    print("[cartographer] Running Archivist (persisting artifacts)...")
+    log.info("Running Archivist (persisting artifacts)...", extra={"run_id": run_id, "agent": "archivist"})
     traces.append({
         "action": "archivist",
         "artifacts": [
@@ -253,11 +279,11 @@ def run_analysis(
     # Semantic index (skip when local_only to avoid embedding API calls)
     idx = SemanticIndex()
     if not local_only:
-        print("[cartographer] Building semantic index (embeddings)...")
+        log.info("Building semantic index (embeddings)...", extra={"run_id": run_id})
         idx.build(modules)
-        print("[cartographer] Semantic index built.")
+        log.info("Semantic index built.", extra={"run_id": run_id})
     else:
-        print("[cartographer] Skipping semantic index build (local-only mode).")
+        log.info("Skipping semantic index build (local-only mode).", extra={"run_id": run_id})
     idx_path = cart / "semantic_index" / "index.json"
     idx.save(idx_path)
 
@@ -270,5 +296,9 @@ def run_analysis(
     }
     ArchivistAgent()._append_trace(cart / "cartography_trace.jsonl", [pipeline_complete_evt])
 
-    print(f"[cartographer] Analysis finished. Artifacts written to: {cart}")
+    log.info(
+        "Analysis finished. Artifacts: %s",
+        str(cart),
+        extra={"run_id": run_id},
+    )
     return OrchestratorResult(kg, modules, datasets, day_one_answers, idx)
