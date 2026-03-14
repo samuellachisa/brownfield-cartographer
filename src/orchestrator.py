@@ -63,6 +63,14 @@ def run_analysis(
     traces: List[Dict] = []
     run_id = str(uuid.uuid4())[:8]
     commit_sha = _git_head(root)
+    traces.append({
+        "action": "pipeline_start",
+        "run_id": run_id,
+        "repo": str(root),
+        "commit_sha": commit_sha,
+        "incremental": incremental,
+        "local_only": local_only,
+    })
 
     # Try incremental: load prior state and changed files
     prior_meta = load_run_metadata(cart)
@@ -91,6 +99,11 @@ def run_analysis(
         if cached:
             kg, modules, datasets, day_one_answers = cached
             changed_files = set(_git_changed_files(root, prior_meta.commit_sha))
+            traces.append({
+                "action": "incremental_diff",
+                "changed_files_count": len(changed_files),
+                "changed_files": list(changed_files)[:50],  # cap for trace size
+            })
             if not changed_files:
                 traces.append({"action": "incremental_skip", "reason": "no changes"})
                 print("[cartographer] Incremental mode: no changed files since last run, skipping.")
@@ -105,7 +118,16 @@ def run_analysis(
     else:
         for k, v in new_modules.items():
             modules[k] = v
-    traces.append({"action": "surveyor", "modules_count": len(modules)})
+    files_by_lang: Dict[str, int] = {}
+    for m in modules.values():
+        lang = getattr(m, "language", "other")
+        files_by_lang[lang] = files_by_lang.get(lang, 0) + 1
+    traces.append({
+        "action": "surveyor",
+        "modules_count": len(modules),
+        "files_by_language": files_by_lang,
+        "files_total": sum(files_by_lang.values()),
+    })
     print(f"[cartographer] Surveyor complete. Modules analyzed: {len(modules)}")
 
     # Derive a concise report of the "hottest" modules by combining structural
@@ -148,7 +170,20 @@ def run_analysis(
     else:
         for k, v in new_datasets.items():
             datasets[k] = v
-    traces.append({"action": "hydrologist", "datasets_count": len(datasets)})
+    transformations = [
+        n for n, d in kg.lineage_graph.nodes(data=True)
+        if d.get("type") == "transformation"
+    ]
+    source_files = set()
+    for n, d in kg.lineage_graph.nodes(data=True):
+        if sf := d.get("source_file"):
+            source_files.add(sf)
+    traces.append({
+        "action": "hydrologist",
+        "datasets_count": len(datasets),
+        "transformations_count": len(transformations),
+        "source_files_analyzed": len(source_files),
+    })
     print(f"[cartographer] Hydrologist complete. Datasets discovered: {len(datasets)}")
 
     # Semanticist (LLM) and Day-One
@@ -156,15 +191,39 @@ def run_analysis(
         print("[cartographer] Running Semanticist (LLM enrichment)...")
         semanticist = SemanticistAgent()
         semanticist.run(root, modules)
-        traces.append({"action": "semanticist"})
+        modules_with_purpose = sum(1 for m in modules.values() if getattr(m, "purpose_statement", None))
+        modules_with_drift = sum(1 for m in modules.values() if getattr(m, "doc_drift", None))
+        traces.append({
+            "action": "semanticist",
+            "modules_with_purpose": modules_with_purpose,
+            "modules_drift_checked": modules_with_drift,
+            "modules_total": len(modules),
+        })
     else:
         print("[cartographer] Skipping Semanticist (local-only mode).")
     day_one_answers = answer_day_one_questions(kg, modules, datasets)
-    traces.append({"action": "day_one"})
+    total_evidence = sum(len(a.evidence) for a in day_one_answers.values())
+    traces.append({
+        "action": "day_one",
+        "questions_answered": len(day_one_answers),
+        "evidence_citations_total": total_evidence,
+        "questions": list(day_one_answers.keys()),
+    })
     print("[cartographer] Day-One onboarding answers synthesized.")
 
     # Archivist
     print("[cartographer] Running Archivist (persisting artifacts)...")
+    traces.append({
+        "action": "archivist",
+        "artifacts": [
+            "CODEBASE.md",
+            "onboarding_brief.md",
+            "lineage_graph.json",
+            "module_graph.json",
+            "state.json",
+            "cartography_trace.jsonl",
+        ],
+    })
     archivist = ArchivistAgent()
     archivist.run(cart, kg, modules, datasets, day_one_answers, traces)
 
@@ -201,6 +260,15 @@ def run_analysis(
         print("[cartographer] Skipping semantic index build (local-only mode).")
     idx_path = cart / "semantic_index" / "index.json"
     idx.save(idx_path)
+
+    pipeline_complete_evt = {
+        "action": "pipeline_complete",
+        "run_id": run_id,
+        "status": "success",
+        "modules_count": len(modules),
+        "datasets_count": len(datasets),
+    }
+    ArchivistAgent()._append_trace(cart / "cartography_trace.jsonl", [pipeline_complete_evt])
 
     print(f"[cartographer] Analysis finished. Artifacts written to: {cart}")
     return OrchestratorResult(kg, modules, datasets, day_one_answers, idx)
