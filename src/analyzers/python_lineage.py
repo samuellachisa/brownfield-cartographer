@@ -74,30 +74,30 @@ class PythonLineageAnalyzer:
                         location=(call.lineno, getattr(call, "end_lineno", call.lineno)),
                     )
 
-        # pandas.read_sql_table(\"table_name\", ...)
+        # pandas.read_sql_table("table_name", ...)
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-            qual = f\"{func.value.id}.{func.attr}\"
-            if qual in {\"pd.read_sql_table\", \"pandas.read_sql_table\"}:
+            qual = f"{func.value.id}.{func.attr}"
+            if qual in {"pd.read_sql_table", "pandas.read_sql_table"}:
                 source = self._first_str_arg(call)
                 if source:
                     return PythonDataDependency(
                         sources=[source],
                         targets=[],
-                        op_type=\"python_read\",
-                        location=(call.lineno, getattr(call, \"end_lineno\", call.lineno)),
+                        op_type="python_read",
+                        location=(call.lineno, getattr(call, "end_lineno", call.lineno)),
                     )
 
-        # spark.read.table(\"table_name\")
+        # spark.read.table("table_name")
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Attribute):
-            qual = f\"{getattr(func.value.value, 'id', '')}.{func.value.attr}.{func.attr}\"
-            if qual.endswith(\"spark.read.table\") or qual == \"spark.read.table\":
+            qual = f"{getattr(func.value.value, 'id', '')}.{func.value.attr}.{func.attr}"
+            if qual.endswith("spark.read.table") or qual == "spark.read.table":
                 source = self._first_str_arg(call)
                 if source:
                     return PythonDataDependency(
                         sources=[source],
                         targets=[],
-                        op_type=\"python_read\",
-                        location=(call.lineno, getattr(call, \"end_lineno\", call.lineno)),
+                        op_type="python_read",
+                        location=(call.lineno, getattr(call, "end_lineno", call.lineno)),
                     )
 
         return None

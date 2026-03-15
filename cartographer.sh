@@ -1,96 +1,117 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Interactive wrapper for Brownfield Cartographer. Run with no args for menu.
 
-# Brownfield Cartographer one-stop script
-# Usage:
-#   ./cartographer.sh [options] <repo-or-github-url>
-#
-# Options:
-#   --incremental   Analyze only changed files (requires git)
-#   --local-only    Skip LLM (static analysis only)
-#   --analyze-only  Do not start the interactive shell after analysis
-#   --force         Re-run analysis even if cache exists
-#   --repo-id       Unique repo identifier for per-repo storage
-#
-# Examples:
-#   ./cartographer.sh .                          # analyze + shell on current repo
-#   ./cartographer.sh ../my-repo                 # local path
-#   ./cartographer.sh https://github.com/org/repo  # GitHub URL
-#   ./cartographer.sh --incremental .            # incremental analysis + shell
-#   ./cartographer.sh --local-only .             # static-only analysis + shell
+set -e
 
-incremental=false
-local_only=false
-analyze_only=false
-force=false
-repo_id=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --incremental)
-      incremental=true
-      shift
-      ;;
-    --local-only)
-      local_only=true
-      shift
-      ;;
-    --analyze-only)
-      analyze_only=true
-      shift
-      ;;
-    --force)
-      force=true
-      shift
-      ;;
-    --repo-id)
-      repo_id="$2"
-      shift 2
-      ;;
-    -*)
-      echo "Unknown option: $1" >&2
-      exit 1
-      ;;
-    *)
-      REPO="$1"
-      shift
-      ;;
-  esac
-done
-
-if [[ -z "${REPO:-}" ]]; then
-  echo "Usage: $0 [options] <repo-or-github-url>" >&2
+PYTHON="${PYTHON:-.venv/bin/python}"
+if [[ ! -x "$PYTHON" ]]; then
+  echo "Error: .venv not found. Run: python -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
   exit 1
 fi
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$ROOT_DIR"
-
-# Ensure env is set up
-if [ ! -d ".venv" ]; then
-  if command -v uv >/dev/null 2>&1; then
-    uv sync
+run_cli() {
+  if [[ "$1" == "--time" ]]; then
+    shift
+    time "$PYTHON" -m src.cli "$@"
   else
-    echo "No .venv found and 'uv' is not installed. Please create a virtualenv and install deps first." >&2
-    echo "For example:" >&2
-    echo "  python -m venv .venv" >&2
-    echo "  source .venv/bin/activate" >&2
-    echo "  pip install -e ." >&2
-    exit 1
+    exec "$PYTHON" -m src.cli "$@"
+  fi
+}
+
+# If args given, pass through to CLI (analyze always timed)
+if [[ $# -gt 0 ]] && [[ "$1" != "menu" ]] && [[ "$1" != "help" ]]; then
+  if [[ "$1" == "analyze" ]]; then
+    run_cli --time "$@"
+  else
+    run_cli "$@"
   fi
 fi
 
-# Build CLI args
-CLI_ARGS=("analyze" "$REPO")
-[[ "$incremental" == "true" ]] && CLI_ARGS+=("--incremental")
-[[ "$local_only" == "true" ]] && CLI_ARGS+=("--local-only")
-[[ -n "$repo_id" ]] && CLI_ARGS+=("--repo-id" "$repo_id")
+# Interactive menu
+echo ""
+echo "  Brownfield Cartographer"
+echo "  ======================="
+echo ""
+echo "  1) analyze      Run full analysis on a repo (timed)"
+echo "  2) query        Run a Navigator query (lineage, blast radius, find, etc.)"
+echo "  3) shell        Interactive shell (analyze & ask)"
+echo "  4) help         Show usage / options"
+echo "  5) exit"
+echo ""
+read -rp "  Select (1-5): " choice
+echo ""
 
-# Always invoke via the module so we don't rely on the broken console script.
-if command -v uv >/dev/null 2>&1; then
-  uv run python -m src.cli "${CLI_ARGS[@]}"
-else
-  source .venv/bin/activate
-  python -m src.cli "${CLI_ARGS[@]}"
-fi
-
+case "$choice" in
+  1)
+    read -rp "  Repo path or GitHub URL [.]: " repo
+    repo=${repo:-.}
+    echo "  Options: --incremental  --local-only  --repo-id ID"
+    read -rp "  Extra options (space-separated, or Enter for none): " opts
+    echo ""
+    run_cli --time analyze "$repo" $opts
+    ;;
+  2)
+    read -rp "  Repo path [.]: " repo
+    repo=${repo:-.}
+    echo ""
+    echo "  Tools: find_implementation | trace_lineage | blast_radius | explain_module"
+    echo "         sources | sinks | what_breaks | upstream | impact"
+    read -rp "  Tool: " tool
+    args=("$repo" "$tool")
+    case "$tool" in
+      trace_lineage|what_breaks|upstream|impact)
+        read -rp "  --dataset (table name): " ds
+        [[ -n "$ds" ]] && args+=(--dataset "$ds")
+        if [[ "$tool" == "trace_lineage" ]]; then
+          read -rp "  --direction (upstream|downstream) [downstream]: " dir
+          dir=${dir:-downstream}
+          args+=(--direction "$dir")
+        fi
+        ;;
+      blast_radius|explain_module)
+        read -rp "  --module-path: " mp
+        [[ -n "$mp" ]] && args+=(--module-path "$mp")
+        ;;
+      find_implementation)
+        read -rp "  --concept: " concept
+        [[ -n "$concept" ]] && args+=(--concept "$concept")
+        read -rp "  --top-k [10]: " topk
+        [[ -n "$topk" ]] && args+=(--top-k "$topk")
+        ;;
+    esac
+    read -rp "  --force (re-analyze)? [y/N]: " force
+    [[ "$force" =~ ^[yY] ]] && args+=(--force)
+    echo ""
+    run_cli query "${args[@]}"
+    ;;
+  3)
+    read -rp "  Repo path [.]: " repo
+    repo=${repo:-.}
+    read -rp "  --force (re-analyze on entry)? [y/N]: " force
+    echo ""
+    if [[ "$force" =~ ^[yY] ]]; then
+      run_cli shell "$repo" --force
+    else
+      run_cli shell "$repo"
+    fi
+    ;;
+  4)
+    "$PYTHON" -m src.cli -h
+    echo ""
+    echo "  Or run: ./cartographer.sh analyze . --local-only"
+    echo "          ./cartographer.sh --time analyze ."
+    echo "          ./cartographer.sh query . upstream --dataset customers"
+    echo "          ./cartographer.sh query . blast_radius --module-path src/orchestrator.py"
+    ;;
+  5)
+    echo "  Bye."
+    exit 0
+    ;;
+  *)
+    echo "  Invalid choice."
+    exit 1
+    ;;
+esac

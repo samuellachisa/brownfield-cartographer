@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +16,8 @@ class DAGConfig:
     dependencies: Dict[str, List[str]]
     # Best-effort schedule string, when available (e.g. Airflow schedule_interval).
     schedule: Optional[str] = None
+    # dbt source tables as schema.table (entry points, no producing transformation).
+    source_tables: List[str] = field(default_factory=list)
 
 
 class DAGConfigParser:
@@ -97,11 +99,27 @@ class DAGConfigParser:
             config_type = "unknown"
             tasks = []
 
+        source_tables_list: List[str] = []
+        if "sources" in data:
+            sources_section = data.get("sources", [])
+            if isinstance(sources_section, list):
+                for src in sources_section:
+                    if not isinstance(src, dict):
+                        continue
+                    src_name = src.get("name") or ""
+                    tables = src.get("tables", [])
+                    if isinstance(tables, list):
+                        for t in tables:
+                            tbl = t.get("name") if isinstance(t, dict) else str(t)
+                            if tbl:
+                                source_tables_list.append(f"{src_name}.{tbl}")
+
         return DAGConfig(
             path=path,
             config_type=config_type,
             tasks=tasks,
             dependencies=dependencies,
             schedule=schedule,
+            source_tables=source_tables_list,
         )
 

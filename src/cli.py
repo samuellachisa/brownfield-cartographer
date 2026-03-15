@@ -15,23 +15,38 @@ from .graph.knowledge_graph import KnowledgeGraph
 from .orchestrator import run_analysis
 from .utils.logging import setup_logging
 from .semantic_index import SemanticIndex
-from .storage import get_cartography_dir, load_state
+from .storage import get_cartography_dir, get_repo_cart_dir, load_state
 
 
-def _resolve_repo(repo: str) -> Path:
-    """Resolve repo path, optionally cloning from GitHub."""
+def _repo_id_from_github_url(url: str) -> str:
+    """Extract owner/repo from GitHub URL (e.g. https://github.com/owner/repo.git -> owner/repo)."""
+    url = url.strip().rstrip("/")
+    if url.startswith("https://github.com/"):
+        parts = url.replace("https://github.com/", "").split("/")
+    elif url.startswith("git@github.com:"):
+        parts = url.replace("git@github.com:", "").replace(".git", "").split("/")
+    else:
+        return ""
+    if len(parts) >= 2:
+        return "/".join(parts[:2]).replace(".git", "")
+    return ""
+
+
+def _resolve_repo(repo: str) -> tuple[Path, str | None]:
+    """Resolve repo path, optionally cloning from GitHub. Returns (path, repo_id or None)."""
     if repo.startswith("https://github.com/") or repo.startswith("git@github.com:"):
         import subprocess
         import tempfile
         clone_dir = Path(tempfile.mkdtemp(prefix="cartographer_clone_"))
         subprocess.check_call(["git", "clone", "--depth", "1", repo, str(clone_dir)])
-        return clone_dir
-    return Path(repo).resolve()
+        repo_id = _repo_id_from_github_url(repo) or None
+        return clone_dir, repo_id
+    return Path(repo).resolve(), None
 
 
 def cmd_analyze(args: argparse.Namespace) -> None:
-    repo_path = _resolve_repo(args.repo)
-    repo_id = getattr(args, 'repo_id', None)
+    repo_path, auto_repo_id = _resolve_repo(args.repo)
+    repo_id = getattr(args, "repo_id", None) or auto_repo_id
     run_analysis(
         str(repo_path),
         repo_id=repo_id,
@@ -43,14 +58,22 @@ def cmd_analyze(args: argparse.Namespace) -> None:
 
 
 def _load_or_run(repo: str, force: bool = False):
-    """Load cached state or run analysis."""
+    """Load cached state or run analysis. Repo can be a path or owner/repo id."""
     repo_path = Path(repo).resolve()
+    # Resolve cart dir: .cartography (for repo root) or .cartography/repos/owner/repo (for repo_id)
+    cart_dir = None
+    if not str(repo).startswith((".", "/")) and "/" in repo and "\\" not in repo:
+        candidate = get_repo_cart_dir(repo)
+        if (candidate / "state.json").exists():
+            cart_dir = candidate
+    if cart_dir is None:
+        cart_dir = repo_path if (repo_path / "state.json").exists() else get_cartography_dir(repo_path)
     if not force:
-        cached = load_state(repo_path)
+        cached = load_state(cart_dir)
         if cached:
             kg, modules, datasets, _ = cached
             idx = SemanticIndex()
-            idx_path = get_cartography_dir(repo_path) / "semantic_index" / "index.json"
+            idx_path = cart_dir / "semantic_index" / "index.json"
             if not idx.load(idx_path):
                 idx.build(modules)
             return kg, modules, datasets, idx
@@ -263,7 +286,7 @@ def main(argv: list[str] | None = None) -> None:
     setup_logging()
     args_list = (argv if argv is not None else sys.argv[1:])[:]
     # Shortcut: cartographer /path -> shell with repo
-    if args_list and args_list[0] not in ("shell", "analyze", "-h", "--help") and not args_list[0].startswith("-"):
+    if args_list and args_list[0] not in ("shell", "analyze", "query", "-h", "--help") and not args_list[0].startswith("-"):
         cmd_shell(argparse.Namespace(repo=args_list[0], force="--force" in args_list))
         return
     parser = build_parser()

@@ -50,24 +50,21 @@ class HydrologistAgent:
                     continue
                 dialect = cfg.sql.for_file(path)
                 self.sql.dialect = dialect
+                _DBT_PLACEHOLDERS = frozenset({"__dbt_this__", "__dbt_model__", "__dbt_var__"})
                 for dep in self.sql.analyze_file(path):
                     if not dep.sources and not dep.targets:
                         continue
-                    src_nodes: List[str] = []
-                    tgt_nodes: List[str] = []
-                    for s in dep.sources:
-                        if s not in datasets:
-                            datasets[s] = DatasetNode(
-                                name=s,
-                                storage_type="table",
-                                schema_snapshot=None,
-                                freshness_sla=None,
-                                owner=None,
-                                is_source_of_truth=False,
-                            )
-                            graph.add_dataset(datasets[s])
-                        src_nodes.append(s)
-                    for t in dep.targets:
+                    src_nodes: List[str] = [
+                        s for s in dep.sources if s not in _DBT_PLACEHOLDERS
+                    ]
+                    tgt_nodes: List[str] = list(dep.targets)
+                    # dbt model files are SELECT-only; SQL analyzer finds no targets.
+                    # Infer target from file path (e.g. models/dim/dim_listings_cleansed.sql -> dim_listings_cleansed).
+                    if not tgt_nodes and dep.sources and "models" in rel:
+                        inferred = path.stem
+                        if inferred and inferred not in (".", ".."):
+                            tgt_nodes = [inferred]
+                    for t in tgt_nodes:
                         if t not in datasets:
                             datasets[t] = DatasetNode(
                                 name=t,
@@ -78,7 +75,17 @@ class HydrologistAgent:
                                 is_source_of_truth=False,
                             )
                             graph.add_dataset(datasets[t])
-                        tgt_nodes.append(t)
+                    for s in src_nodes:
+                        if s not in datasets:
+                            datasets[s] = DatasetNode(
+                                name=s,
+                                storage_type="table",
+                                schema_snapshot=None,
+                                freshness_sla=None,
+                                owner=None,
+                                is_source_of_truth=False,
+                            )
+                            graph.add_dataset(datasets[s])
 
                     transform = TransformationNode(
                         source_datasets=src_nodes,
@@ -159,7 +166,23 @@ class HydrologistAgent:
                 if changed_files is not None and rel not in changed_files:
                     continue
                 cfg = self.dag_parser.parse(path)
-                if not cfg or not cfg.tasks:
+                if not cfg:
+                    continue
+
+                # Add dbt source tables as entry-point datasets (no producing transformation).
+                for tbl in getattr(cfg, "source_tables", []) or []:
+                    if tbl not in datasets:
+                        datasets[tbl] = DatasetNode(
+                            name=tbl,
+                            storage_type="table",
+                            schema_snapshot=None,
+                            freshness_sla=None,
+                            owner=None,
+                            is_source_of_truth=False,
+                        )
+                        graph.add_dataset(datasets[tbl])
+
+                if not cfg.tasks:
                     continue
 
                 # Ensure DatasetNode instances exist for every task/pipeline node.

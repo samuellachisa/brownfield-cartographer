@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple, Optional, Set
@@ -52,6 +53,66 @@ class SQLLineageAnalyzer:
 
     def __init__(self, dialect: str | None = None) -> None:
         self.dialect = dialect
+
+    @staticmethod
+    def _strip_dbt_jinja(text: str) -> tuple[str, set[str]]:
+        """Strip dbt/Jinja templating so sqlglot can parse the SQL.
+        - {% ... %} blocks: removed entirely
+        - {{ ref('table') }}: replaced with table name, added to ref_sources
+        - {{ config(...) }} and other {{ ... }}: replaced with blank
+        Returns (cleaned_sql, ref_sources).
+        """
+        ref_sources: set[str] = set()
+
+        def _ref_repl(match: re.Match) -> str:
+            inner = match.group(1).strip()
+            # ref('table') or ref("table")
+            ref_match = re.search(r"ref\(['\"]([^'\"]+)['\"]\)", inner)
+            if ref_match:
+                tbl = ref_match.group(1)
+                ref_sources.add(tbl)
+                return tbl
+            # source('schema', 'table')
+            src_match = re.search(
+                r"source\(['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]\)", inner
+            )
+            if src_match:
+                schema, tbl = src_match.group(1), src_match.group(2)
+                qualified = f"{schema}.{tbl}"
+                ref_sources.add(qualified)
+                return qualified
+            # {{ this }} (incremental), {{ model }}, {{ column_name }} (tests)
+            if re.match(r"^\s*this\s*$", inner):
+                return "__dbt_this__"
+            if re.match(r"^\s*model\s*$", inner):
+                return "__dbt_model__"
+            if re.match(r"^\s*column_name\s*$", inner):
+                return "__dbt_column__"
+            # Other vars (col, col.column, loop.index, etc.) - placeholder for parseable SQL
+            if re.match(r"^\s*[a-zA-Z_][a-zA-Z0-9_.]*\s*$", inner):
+                return "__dbt_var__"
+            return " "
+
+        # Strip {% ... %} control blocks (snapshot, macro, for, if, etc.)
+        text = re.sub(r"\{%.*?%\}\s*", " ", text, flags=re.DOTALL)
+
+        # Replace {{ ... }} expressions
+        text = re.sub(r"\{\{\s*(.*?)\s*\}\}", _ref_repl, text, flags=re.DOTALL)
+
+        return text, ref_sources
+
+    @staticmethod
+    def _strip_fts5_ddl(sql: str) -> str:
+        """Remove CREATE VIRTUAL TABLE ... USING fts5 statements.
+
+        sqlglot does not support FTS5 syntax and emits parse warnings. Stripping
+        these statements before parsing avoids the noise while having minimal
+        impact (FTS5 tables rarely carry lineage we need).
+        """
+        pattern = (
+            r"CREATE\s+VIRTUAL\s+TABLE\s+[^;]*?USING\s+fts5\s*[^;]*;?"
+        )
+        return re.sub(pattern, "", sql, flags=re.IGNORECASE | re.DOTALL)
 
     @staticmethod
     def _resolve_cte_to_physical(
@@ -157,27 +218,14 @@ class SQLLineageAnalyzer:
         """
         text = path.read_text(encoding="utf-8", errors="ignore")
 
-        # Best-effort normalization for common dbt-style ref() macros embedded
-        # in templating (e.g. {{ ref("my_table") }}). We strip the templating
-        # delimiters so sqlglot can parse the underlying SQL and separately
-        # track the referenced objects as sources.
-        ref_sources: set[str] = set()
+        # Strip dbt/Jinja templating ({% %}, {{ }}) so sqlglot can parse.
+        # Extracts ref('table') as sources; replaces config(), macros, etc. with space.
         try:
-            import re
-
-            def _ref_repl(match: re.Match) -> str:
-                inner = match.group(1)
-                # inner is like ref('my_table') or ref(\"my_table\")
-                name_match = re.search(r"ref\(['\"]([^'\"]+)['\"]\)", inner)
-                if name_match:
-                    tbl = name_match.group(1)
-                    ref_sources.add(tbl)
-                    return tbl
-                return inner
-
-            text_for_parse = re.sub(r"\{\{\s*(.*?)\s*\}\}", _ref_repl, text)
+            text_for_parse, ref_sources = self._strip_dbt_jinja(text)
         except Exception:
-            text_for_parse = text
+            text_for_parse, ref_sources = text, set()
+
+        text_for_parse = self._strip_fts5_ddl(text_for_parse)
 
         try:
             statements = sqlglot.parse(text_for_parse, read=self.dialect)
@@ -192,6 +240,8 @@ class SQLLineageAnalyzer:
         joined = "\n".join(lines)
 
         for idx, stmt in enumerate(statements):
+            if stmt is None:
+                continue
             # Collect CTE names up-front so we can exclude them from physical
             # source tables.
             cte_names: List[str] = []
@@ -219,6 +269,8 @@ class SQLLineageAnalyzer:
                 if not alias:
                     continue
                 body = cte.this
+                if body is None:
+                    continue
                 deps: Set[str] = set()
                 for t in body.find_all(exp.Table):
                     tbl_sql = t.sql(dialect=self.dialect)
@@ -253,6 +305,9 @@ class SQLLineageAnalyzer:
                 if t.name not in cte_names
             }
             sources.update(ref_sources)
+            # Include CTE-resolved physical tables (refs inside CTEs may not appear as Table nodes).
+            for deps in cte_resolved.values():
+                sources.update(deps)
 
             # Column-level read lineage: table -> set(columns)
             read_cols: Dict[str, Set[str]] = {}
